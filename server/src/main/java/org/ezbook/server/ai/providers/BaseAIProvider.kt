@@ -3,11 +3,14 @@ package org.ezbook.server.ai.providers
 import android.util.Log
 import com.google.gson.Gson
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.ezbook.server.Server
 import org.ezbook.server.constant.Setting
 import org.ezbook.server.db.Db
 import org.ezbook.server.tools.SettingUtils
 import java.util.concurrent.TimeUnit
+import kotlin.collections.component1
+import kotlin.collections.component2
 
 /**
  * AI提供商的基础抽象类
@@ -49,10 +52,12 @@ abstract class BaseAIProvider {
 
     /**
      * 发送请求到AI服务（返回 Result）。
+     * @param image 可选，图片 Base64，非空时以视觉模式调用（需模型支持 vision）
      */
     abstract suspend fun request(
         system: String,
         user: String,
+        image: String = "",
         onChunk: ((String) -> Unit)? = null
     ): Result<String>
 
@@ -71,5 +76,9 @@ abstract class BaseAIProvider {
         return replace(regex, "")          // 去掉所有 <think>…</think>
             .replace(Regex("\\n{3,}"), "\n\n") // 压缩连续空行
             .trim()
+    }
+
+    fun Request.Builder.addUserAgent() = apply {
+        addHeader("User-Agent", "AutoAccounting/${Server.versionCode}")
     }
 }

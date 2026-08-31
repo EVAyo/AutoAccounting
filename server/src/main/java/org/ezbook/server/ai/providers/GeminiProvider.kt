@@ -1,15 +1,13 @@
 package org.ezbook.server.ai.providers
+
+import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import com.google.gson.Gson
-import com.google.gson.JsonParser
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.ezbook.server.log.ServerLog
 import org.ezbook.server.tools.runCatchingExceptCancel
-import org.ezbook.server.tools.ServerLog
-import java.util.concurrent.TimeUnit
 
 /**
  * Gemini API 提供商实现
@@ -19,13 +17,13 @@ class GeminiProvider : BaseAIProvider() {
 
     override val createKeyUri: String = "https://aistudio.google.com/app/apikey"
 
-    override val apiUri: String = "https://generativelanguage.googleapis.com/v1beta/models"
+    override val apiUri: String = "https://generativelanguage.googleapis.com/v1beta"
 
-    override var model: String = "gemini-2.0-flash"
+    override var model: String = "models/gemini-3-flash-preview"
 
     private suspend fun base(): String {
         val base = getApiUri().trimEnd('/')
-        return if (base.endsWith("/v1beta/models")) base else "$base/v1beta/models"
+        return if (base.endsWith("/v1beta")) base else "$base/v1beta"
     }
 
     /**
@@ -35,8 +33,10 @@ class GeminiProvider : BaseAIProvider() {
         val url = "${base()}?key=${getApiKey()}"
         val request = Request.Builder()
             .url(url)
+            .addUserAgent()
             .get()
             .build()
+
         runCatchingExceptCancel {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw RuntimeException("Failed to get models: ${response.code}")
@@ -55,40 +55,48 @@ class GeminiProvider : BaseAIProvider() {
     }
 
     /**
-     * 发送聊天请求
+     * 发送聊天请求（支持视觉识别）
      */
     override suspend fun request(
         system: String,
         user: String,
+        image: String,
         onChunk: ((String) -> Unit)?
     ): Result<String> =
         withContext(Dispatchers.IO) {
             val path = if (onChunk === null) "generateContent" else "streamGenerateContent?alt=sse"
-            val url = "${base()}/$model:$path"
-            val requestBody = mapOf(
-                "contents" to listOf(
+            val url = "${base()}/${getModel()}:$path"
+            val secondParts = mutableListOf<Map<String, Any>>()
+            secondParts.add(mapOf("text" to user))
+            if (image.isNotBlank()) {
+                val base64Data = if (image.startsWith("data:image")) {
+                    image.substringAfter("base64,").ifBlank { image }
+                } else image
+                secondParts.add(
                     mapOf(
-                        "role" to "user",
-                        "parts" to listOf(
-                            mapOf("text" to system)
-                        )
-                    ),
-                    mapOf(
-                        "role" to "user",
-                        "parts" to listOf(
-                            mapOf("text" to user)
+                        "inlineData" to mapOf(
+                            "mimeType" to "image/jpeg",
+                            "data" to base64Data
                         )
                     )
+                )
+            }
+            val requestBody = mapOf(
+                "contents" to listOf(
+                    mapOf("role" to "user", "parts" to listOf(mapOf("text" to system))),
+                    mapOf("role" to "user", "parts" to secondParts)
                 )
             )
             val request = Request.Builder()
                 .url(url)
+                .addUserAgent()
                 .post(
                     gson.toJson(requestBody).toRequestBody("application/json".toMediaTypeOrNull())
                 )
                 .addHeader("x-goog-api-key", getApiKey())
                 .addHeader("Content-Type", "application/json")
                 .build()
+
             runCatchingExceptCancel {
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {

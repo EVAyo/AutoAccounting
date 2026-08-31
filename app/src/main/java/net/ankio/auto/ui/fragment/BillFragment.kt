@@ -17,7 +17,9 @@
 package net.ankio.auto.ui.fragment
 
 import android.os.Bundle
+import android.view.MenuItem
 import android.view.View
+import androidx.appcompat.widget.SearchView
 import androidx.recyclerview.widget.RecyclerView
 import net.ankio.auto.R
 import net.ankio.auto.databinding.FragmentBillBinding
@@ -26,6 +28,7 @@ import net.ankio.auto.storage.Logger
 import net.ankio.auto.ui.adapter.BillAdapter
 import net.ankio.auto.ui.api.BasePageFragment
 import net.ankio.auto.ui.api.BaseSheetDialog
+import net.ankio.auto.ui.components.MaterialSearchView
 import net.ankio.auto.ui.components.WrapContentLinearLayoutManager
 import net.ankio.auto.ui.dialog.BillEditorDialog
 import net.ankio.auto.ui.dialog.BillMoreDialog
@@ -38,22 +41,37 @@ import org.ezbook.server.constant.BillState
 
 
 open class BillFragment : BasePageFragment<OrderGroup, FragmentBillBinding>() {
-    // 同步状态筛选：由用户在状态按钮中选择，默认空表示保持原有行为（由后端决定）
-    private var syncType = mutableListOf<String>()
+    /** 时间筛选模式：按月或全部 */
+    private enum class TimeFilterMode { MONTH, ALL }
+
+    // 同步状态筛选：初始化为全部状态
+    private var syncType = mutableListOf(
+        BillState.Synced.name,
+        BillState.Edited.name,
+        BillState.Wait2Edit.name
+    )
+
+    /** 默认按月筛选，保持现有行为不变 */
+    private var timeFilterMode: TimeFilterMode = TimeFilterMode.MONTH
+
     private var currentYear: Int = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
     private var currentMonth: Int =
         java.util.Calendar.getInstance().get(java.util.Calendar.MONTH) + 1
+
+    private var searchKeyword = ""
+
+    override val pageSize: Int = Int.MAX_VALUE
+
+    /**
+     * 加载数据：使用服务端分组，避免客户端重复分组导致的性能问题
+     */
     override suspend fun loadData(): List<OrderGroup> {
-        val list = BillAPI.list(page, pageSize, syncType, currentYear, currentMonth)
-
-
-        val groupedData = list.groupBy {
-            DateUtils.stampToDate(it.time, "yyyy-MM-dd")
-        }.map { (date, bills) ->
-            OrderGroup(date, bills)
+        // 服务端已经完成分组，直接返回
+        return if (timeFilterMode == TimeFilterMode.ALL) {
+            BillAPI.listGrouped(syncType, keyword = searchKeyword)
+        } else {
+            BillAPI.listGrouped(syncType, currentYear, currentMonth, searchKeyword)
         }
-
-        return if (list.isEmpty()) emptyList() else groupedData
     }
 
     private val adapter = BillAdapter()
@@ -74,24 +92,11 @@ open class BillFragment : BasePageFragment<OrderGroup, FragmentBillBinding>() {
         }
 
         // 设置长按事件
-        adapter.setOnItemLongClickListener { item, position, itemAdapter ->
+        adapter.setOnItemLongClickListener { item, _, itemAdapter ->
             if (!net.ankio.auto.utils.PrefManager.confirmDeleteBill) {
-                Logger.i("删除账单: ${item.id}")
-                itemAdapter.removeItem(item)
-                launch { BillAPI.remove(item.id) }
+                deleteBill(item, itemAdapter)
             } else {
-                BaseSheetDialog.create<BottomSheetDialogBuilder>(requireContext())
-                    .setTitleInt(R.string.delete_title)
-                    .setMessage(R.string.delete_bill_message)
-                    .setPositiveButton(R.string.sure_msg) { _, _ ->
-                        Logger.i("删除账单: ${item.id}")
-                        itemAdapter.removeItem(item)
-                        launch {
-                            BillAPI.remove(item.id)
-                        }
-                    }
-                    .setNegativeButton(R.string.cancel_msg) { _, _ -> }
-                    .show()
+                showDeleteConfirmDialog { deleteBill(item, itemAdapter) }
             }
         }
 
@@ -111,26 +116,78 @@ open class BillFragment : BasePageFragment<OrderGroup, FragmentBillBinding>() {
     }
 
 
+    /**
+     * 设置筛选器
+     */
     private fun setupFilters() {
-        // 月份按钮：显示当前年月，点击弹出月份选择器
-        binding.inputMonthButton.text = formatMonthLabel(currentYear, currentMonth)
+        setupMonthFilter()
+        setupStatusFilter()
+    }
+
+    /**
+     * 设置月份筛选器
+     */
+    private fun setupMonthFilter() {
+        updateMonthFilterLabel()
         binding.inputMonthChevron.setOnClickListener {
-            BaseSheetDialog.create<net.ankio.auto.ui.dialog.DateTimePickerDialog>(requireContext())
-                .setTitle(getString(R.string.select_month))
-                .setYearMonthOnly(true)
-                .setOnDateTimeSelected { year, month, _, _, _ ->
-                    currentYear = year
-                    currentMonth = month
-                    // 更新月份按钮显示文本
-                    binding.inputMonthButton.text = formatMonthLabel(currentYear, currentMonth)
-                    reload()
-                }.setOnDismiss {
+            val filterOptions = linkedMapOf(
+                getString(R.string.filter_time_month) to TimeFilterMode.MONTH,
+                getString(R.string.filter_time_all) to TimeFilterMode.ALL,
+            )
+            ListPopupUtilsGeneric.create<Map.Entry<String, TimeFilterMode>>(requireContext())
+                .setAnchor(it)
+                .setList(
+                    filterOptions.entries.associateBy(
+                        { entry -> entry.key },
+                        { value -> value })
+                )
+                .setOnItemClick { _, _, entry ->
+                    if (entry.value == TimeFilterMode.MONTH) {
+                        showMonthPickerDialog()
+                    } else {
+                        timeFilterMode = TimeFilterMode.ALL
+                        updateMonthFilterLabel()
+                        reload()
+                    }
+                }
+                .setOnDismiss {
                     binding.inputMonthChevron.isChecked = false
                 }
                 .show()
         }
+    }
 
-        // 同步状态按钮：点击弹出简单菜单，供用户选择
+    /** 显示月份选择弹窗，并在确认后更新筛选条件 */
+    private fun showMonthPickerDialog() {
+        BaseSheetDialog.create<net.ankio.auto.ui.dialog.DateTimePickerDialog>(requireContext())
+            .setTitle(getString(R.string.select_month))
+            .setYearMonthOnly(true)
+            .setOnDateTimeSelected { year, month, _, _, _ ->
+                timeFilterMode = TimeFilterMode.MONTH
+                currentYear = year
+                currentMonth = month
+                updateMonthFilterLabel()
+                reload()
+            }
+            .setOnDismiss {
+                binding.inputMonthChevron.isChecked = false
+            }
+            .show()
+    }
+
+    /** 按当前筛选模式刷新时间筛选按钮文案 */
+    private fun updateMonthFilterLabel() {
+        binding.inputMonthButton.text = if (timeFilterMode == TimeFilterMode.ALL) {
+            getString(R.string.filter_time_all)
+        } else {
+            formatMonthLabel(currentYear, currentMonth)
+        }
+    }
+
+    /**
+     * 设置状态筛选器
+     */
+    private fun setupStatusFilter() {
         val statusItems = linkedMapOf(
             getString(R.string.filter_type_all) to null,
             getString(R.string.item_synced) to BillState.Synced,
@@ -143,21 +200,29 @@ open class BillFragment : BasePageFragment<OrderGroup, FragmentBillBinding>() {
                 .setAnchor(anchorView)
                 .setList(statusItems.entries.associateBy({ it.key }, { it }))
                 .setOnItemClick { _, key, entry ->
-                    // 更新筛选集合
-                    syncType.clear()
-                    entry.value?.let { state -> syncType.add(state.name) } ?: run {
-                        // 全部：包含三种状态
-                        syncType.add(BillState.Synced.name)
-                        syncType.add(BillState.Edited.name)
-                        syncType.add(BillState.Wait2Edit.name)
-                    }
-                    // 更新按钮文案并刷新
+                    updateSyncTypeFilter(entry.value)
                     binding.inputStatusButton.text = key
                     reload()
-                }.setOnDismiss {
+                }
+                .setOnDismiss {
                     binding.inputStatusChevron.isChecked = false
                 }
                 .show()
+        }
+    }
+
+    /**
+     * 更新同步状态筛选
+     */
+    private fun updateSyncTypeFilter(state: BillState?) {
+        syncType.clear()
+        if (state != null) {
+            syncType.add(state.name)
+        } else {
+            // 全部：包含三种状态
+            syncType.add(BillState.Synced.name)
+            syncType.add(BillState.Edited.name)
+            syncType.add(BillState.Wait2Edit.name)
         }
     }
 
@@ -167,6 +232,30 @@ open class BillFragment : BasePageFragment<OrderGroup, FragmentBillBinding>() {
         return "$year-$mm"
     }
 
+    /**
+     * 删除账单
+     * 抽取删除逻辑，消除重复代码
+     */
+    private fun deleteBill(
+        item: org.ezbook.server.db.model.BillInfoModel,
+        itemAdapter: net.ankio.auto.ui.adapter.BillItemAdapter
+    ) {
+        Logger.i("删除账单: ${item.id}")
+        itemAdapter.removeItem(item)
+        launch { BillAPI.remove(item.id) }
+    }
+
+    /**
+     * 显示删除确认对话框
+     */
+    private fun showDeleteConfirmDialog(onConfirm: () -> Unit) {
+        BaseSheetDialog.create<BottomSheetDialogBuilder>(requireContext())
+            .setTitleInt(R.string.delete_title)
+            .setMessage(R.string.delete_bill_message)
+            .setPositiveButton(R.string.sure_msg) { _, _ -> onConfirm() }
+            .setNegativeButton(R.string.cancel_msg) { _, _ -> }
+            .show()
+    }
 
     override fun onResume() {
         super.onResume()
@@ -195,6 +284,38 @@ open class BillFragment : BasePageFragment<OrderGroup, FragmentBillBinding>() {
                 else -> false
             }
         }
+        setUpSearch()
+    }
+
+    private var searchJob: kotlinx.coroutines.Job? = null
+
+    private fun setUpSearch() {
+        val searchItem = binding.topAppBar.menu.findItem(R.id.action_search) ?: return
+        val searchView = searchItem.actionView as? MaterialSearchView ?: return
+
+        searchView.setOnQueryTextListener(object : SearchView.OnQueryTextListener {
+            override fun onQueryTextSubmit(query: String?): Boolean = true
+            override fun onQueryTextChange(newText: String?): Boolean {
+                searchKeyword = newText ?: ""
+                searchJob?.cancel()
+                searchJob = launch {
+                    kotlinx.coroutines.delay(300)
+                    reloadSilently() // 实时触发静默刷新，避免闪烁
+                }
+                return true
+            }
+        })
+
+        // 监听搜索框展开和收起
+        searchItem.setOnActionExpandListener(object : MenuItem.OnActionExpandListener {
+            override fun onMenuItemActionExpand(item: MenuItem): Boolean = true
+            override fun onMenuItemActionCollapse(item: MenuItem): Boolean {
+                searchKeyword = ""
+                searchJob?.cancel()
+                reload()
+                return true
+            }
+        })
     }
 
     // 抽取删除数据的逻辑

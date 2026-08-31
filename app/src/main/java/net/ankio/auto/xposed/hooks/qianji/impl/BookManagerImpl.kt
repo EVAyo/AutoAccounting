@@ -27,6 +27,7 @@ import net.ankio.auto.xposed.hooks.qianji.models.QjBookModel
 import org.ezbook.server.constant.Setting
 import net.ankio.auto.http.api.BookNameAPI
 import net.ankio.auto.http.api.SettingAPI
+import net.ankio.auto.xposed.core.logger.XposedLogger
 import org.ezbook.server.db.model.BookNameModel
 import net.ankio.dex.model.Clazz
 import net.ankio.dex.model.ClazzMethod
@@ -90,8 +91,8 @@ object BookManagerImpl : HookerClazz() {
             bookManagerInstance,
             "getAllBooks",
             AppRuntime.application!!,
-            true,
-            1
+            false,// true 是个人账本
+            -1 // -1 是全部账本 0 是隐藏账本，1 是可见账本
         ) as List<*>
     }
 
@@ -125,6 +126,7 @@ object BookManagerImpl : HookerClazz() {
             list.forEach {
                 if (it == null) return@forEach
                 val book = QjBookModel.fromObject(it)
+                if (!book.isVisible()) return@forEach
                 bookList.add(BookNameModel().apply {
                     name = book.getName()
                     icon = book.getCover() ?: ""
@@ -135,12 +137,7 @@ object BookManagerImpl : HookerClazz() {
             // 幂等：内容哈希一致且非调试模式则跳过同步
             val sync = Gson().toJson(bookList)
             val md5 = MD5HashTable.md5(sync)
-            val server = SettingAPI.get(Setting.HASH_BOOK, "")
-            if (server == md5 && !AppRuntime.debug) {
-                AppRuntime.manifest.i("跳过账本同步，MD5 一致（server=${server}, local=${md5}）")
-                return@withContext bookList
-            }
-            AppRuntime.manifest.i("同步账本数据: $sync")
+            XposedLogger.i(" sync books, count=${bookList.size}")
             BookNameAPI.put(bookList, md5)
             withContext(Dispatchers.Main) {
                 MessageUtils.toast("已同步账本信息到自动记账")

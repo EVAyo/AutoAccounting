@@ -15,16 +15,17 @@
 
 package net.ankio.auto.ui.fragment
 
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Color
 import android.os.Bundle
 import android.util.Base64
 import android.view.LayoutInflater
+import android.webkit.JavascriptInterface
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.core.content.FileProvider
 import androidx.core.graphics.createBitmap
 import androidx.navigation.fragment.findNavController
@@ -34,7 +35,7 @@ import net.ankio.auto.R
 import net.ankio.auto.databinding.FragmentAnalysisDetailBinding
 import net.ankio.auto.http.api.AnalysisTaskAPI
 import net.ankio.auto.storage.Logger
-import net.ankio.auto.ui.api.BaseFragment
+import net.ankio.auto.ui.api.BaseWebViewFragment
 import net.ankio.auto.ui.utils.LoadingUtils
 import net.ankio.auto.ui.utils.ToastUtils
 import net.ankio.auto.utils.DateUtils
@@ -49,14 +50,20 @@ import java.util.Locale
  * AI分析详情页面
  * 用于查看AI生成的财务分析报告
  */
-class AnalysisDetailFragment : BaseFragment<FragmentAnalysisDetailBinding>() {
+class AnalysisDetailFragment : BaseWebViewFragment<FragmentAnalysisDetailBinding>() {
 
     private var taskId: Long = -1
     private var taskModel: AnalysisTaskModel? = null
+    private var isPrivacyMode = false
+
+    /** JSON 模式导出时由 JS 回调，需在此关闭 loading */
+    private var exportLoading: LoadingUtils? = null
 
     companion object {
         private const val ARG_TASK_ID = "task_id"
     }
+
+    override fun getWebView(): WebView = binding.webView
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -69,8 +76,6 @@ class AnalysisDetailFragment : BaseFragment<FragmentAnalysisDetailBinding>() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
-        // 获取任务ID
         taskId = arguments?.getLong(ARG_TASK_ID, -1) ?: -1
         if (taskId == -1L) {
             findNavController().popBackStack()
@@ -81,387 +86,309 @@ class AnalysisDetailFragment : BaseFragment<FragmentAnalysisDetailBinding>() {
         loadTaskDetail()
     }
 
-    override fun onDestroyView() {
-        // 在销毁视图前，尽最大可能阻断 WebView 的后续回调
-        try {
-            binding.webView.apply {
-                stopLoading()
-            }
-        } catch (_: Throwable) {
-        }
-        super.onDestroyView()
-    }
-
-    /**
-     * 设置UI组件
-     */
+    @SuppressLint("SetJavaScriptEnabled")
     private fun setupUI() {
-        // 设置标题
-        binding.topAppBar.setTitle(R.string.analysis_detail_title)
+        // 注册导出桥接：WebView.draw() 无法捕获 ECharts Canvas，需通过 html2canvas + JS 回传
+        binding.webView.addJavascriptInterface(ExportBridge(), "AndroidExport")
 
-        // 设置WebView
-        setupWebView()
+        binding.topAppBar.apply {
+            setTitle(R.string.analysis_detail_title)
+            setNavigationOnClickListener { findNavController().popBackStack() }
+            inflateMenu(R.menu.analysis_detail_menu)
+            setOnMenuItemClickListener {
+                when (it.itemId) {
+                    R.id.action_privacy_mode -> {
+                        togglePrivacyMode(it)
+                        true
+                    }
 
-        // 设置点击事件
-        binding.btnShare.setOnClickListener { shareAsImage() }
-
-        // 设置返回按钮
-        binding.topAppBar.setNavigationOnClickListener {
-            @Suppress("DEPRECATION")
-            requireActivity().onBackPressed()
-        }
-    }
-
-    /**
-     * 设置WebView
-     */
-    private fun setupWebView() {
-        binding.webView.apply {
-            settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                loadWithOverviewMode = true
-                useWideViewPort = true
-                setSupportZoom(false)
-            }
-
-            webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    super.onPageFinished(view, url)
-                    // 页面加载完成后显示分享按钮
-                    if (!uiReady()) return
-                    binding.btnShare.visibility = View.VISIBLE
-                    binding.webView.visibility = View.VISIBLE
+                    else -> false
                 }
             }
         }
+        binding.btnShare.setOnClickListener { shareAsImage() }
     }
 
     /**
-     * 加载任务详情
+     * JS Bridge：接收 html2canvas 导出的 base64 图片
+     * 注意：@JavascriptInterface 方法在 WebView 线程调用，需 post 到主线程执行 UI
      */
+    private inner class ExportBridge {
+        @JavascriptInterface
+        fun onImageCaptured(dataUrl: String) {
+            view?.post { handleCapturedImage(dataUrl) }
+        }
+
+        @JavascriptInterface
+        fun onCaptureFailed(msg: String) {
+            view?.post {
+                Logger.e("导出失败: $msg")
+                ToastUtils.error(getString(R.string.analysis_generating_image) + ": $msg")
+                exportLoading?.close()
+                exportLoading = null
+            }
+        }
+    }
+
+    private fun handleCapturedImage(dataUrl: String) {
+        launch {
+            try {
+                val base64 = dataUrl.removePrefix("data:image/png;base64,")
+                val bytes = Base64.decode(base64, Base64.DEFAULT)
+                val file = File(
+                    File(requireContext().cacheDir, "ai").apply { if (!exists()) mkdirs() },
+                    "analysis_${taskId}_${System.currentTimeMillis()}.png"
+                )
+                withContext(Dispatchers.IO) {
+                    file.writeBytes(bytes)
+                }
+                shareImageFile(file)
+            } catch (e: Exception) {
+                Logger.e("分享失败", e)
+                ToastUtils.error(getString(R.string.analysis_generating_image) + ": ${e.message}")
+            } finally {
+                exportLoading?.close()
+                exportLoading = null
+            }
+        }
+    }
+
+    private fun togglePrivacyMode(item: android.view.MenuItem) {
+        isPrivacyMode = !isPrivacyMode
+        item.setIcon(if (isPrivacyMode) R.drawable.ic_visibility_off else R.drawable.ic_visibility)
+        binding.webView.evaluateJavascript("togglePrivacyMode($isPrivacyMode)", null)
+    }
+
+    override fun loadInitialUrl(): String? = null
+
     private fun loadTaskDetail() {
         val loading = LoadingUtils(requireActivity())
-
         launch {
             loading.show(getString(R.string.loading))
-
             try {
                 val task = AnalysisTaskAPI.getTaskById(taskId)
                 loading.close()
-
                 if (task != null && !task.resultHtml.isNullOrBlank()) {
                     taskModel = task
                     binding.topAppBar.title = task.title
                     binding.topAppBar.subtitle =
                         DateUtils.formatTimeRange(requireContext(), task.startTime, task.endTime)
-                    val htmlContent = convertToHtml(task.resultHtml!!)
-                    displayHtml(htmlContent)
+                    handleData(task.resultHtml!!)
                 } else {
-                    showError(getString(R.string.analysis_result_not_found))
+                    ToastUtils.error(getString(R.string.analysis_result_not_found))
                 }
-
             } catch (e: Exception) {
                 loading.close()
                 Logger.e("加载分析详情失败", e)
-                showError(getString(R.string.analysis_load_error, e.message))
             }
         }
     }
 
-    /**
-     * 显示HTML内容
-     */
-    private fun displayHtml(htmlContent: String) {
-        if (!uiReady()) return
-        binding.webView.loadDataWithBaseURL(null, htmlContent, "text/html", "UTF-8", null)
-        binding.statusPage.showContent()
+    private fun handleData(data: String) {
+        val isJson = data.trimStart().startsWith("{")
+        if (isJson) {
+            binding.webView.loadUrl("file:///android_asset/summary/ai.html")
+        } else {
+            val wrappedHtml = wrapLegacyHtml(data, getAppLogoBase64(), getString(R.string.app_name))
+            binding.webView.loadDataWithBaseURL(null, wrappedHtml, "text/html", "UTF-8", null)
+            binding.btnShare.visibility = View.VISIBLE
+            binding.webView.visibility = View.VISIBLE
+            binding.statusPage.showContent()
+        }
     }
 
-    /**
-     * 分享为图片
-     */
-    private fun shareAsImage() {
-        val loading = LoadingUtils(requireActivity())
+    override fun onWebViewReady() {
+        val data = taskModel?.resultHtml ?: return
+        if (data.trimStart().startsWith("{")) {
+            // 检查原始数据是否为空对象
+            if (data.trim() == "{}") {
+                ToastUtils.error(getString(R.string.analysis_result_empty))
+                findNavController().popBackStack()
+                return
+            }
 
+            val finalJson = buildFinalJson(
+                data, getAppLogoBase64(), getString(R.string.app_name),
+                SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
+            )
+
+            // 检查构建后的JSON是否为空对象（解析失败的情况）
+            if (finalJson == "{}") {
+                ToastUtils.error(getString(R.string.analysis_result_parse_error))
+                findNavController().popBackStack()
+                return
+            }
+
+            binding.webView.evaluateJavascript("setJson($finalJson);", null)
+            binding.btnShare.visibility = View.VISIBLE
+            binding.webView.visibility = View.VISIBLE
+            binding.statusPage.showContent()
+        }
+    }
+
+    private fun wrapLegacyHtml(content: String, logoBase64: String, appName: String): String {
+        val currentTime = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
+        return """
+        <!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            :root { --text-primary: #1f2937; --text-secondary: #6b7280; }
+            @media (prefers-color-scheme: dark) { :root { --text-primary: #e5e7eb; --text-secondary: #9ca3af; } }
+            body { padding: 1.5rem; font-family: sans-serif; color: var(--text-primary); }
+            .header { display: flex; align-items: center; gap: 12px; padding-bottom: 1.5rem; }
+            .logo img { width: 28px; height: 28px; border-radius: 6px; }
+            .period-title { font-size: 18px; font-weight: 600; margin: 0; }
+            .footer { text-align: center; padding: 1.5rem; color: var(--text-secondary); font-size: 14px; }
+        </style>
+        <script>
+            function togglePrivacyMode(enabled) {
+                function processTextNodes(node) {
+                    if (node.nodeType === Node.TEXT_NODE) {
+                        if (enabled) {
+                            // 支持格式：¥100, ¥ 100, ¥-100, ¥ -100
+                            if (/¥\s*-?[\d,.]+/.test(node.nodeValue)) {
+                                if (!node._originalText) node._originalText = node.nodeValue;
+                                node.nodeValue = node.nodeValue.replace(/¥\s*-?[\d,.]+/g, '¥***');
+                            }
+                        } else {
+                            if (node._originalText) {
+                                node.nodeValue = node._originalText;
+                                delete node._originalText;
+                            }
+                        }
+                    } else if (node.nodeType === Node.ELEMENT_NODE) {
+                        node.childNodes.forEach(processTextNodes);
+                    }
+                }
+                processTextNodes(document.body);
+            }
+        </script>
+        </head><body>
+            <div class="header">
+                <div class="logo">${if (logoBase64.isNotEmpty()) "<img src=\"$logoBase64\">" else "💰"}</div>
+                <p class="period-title">$appName • 财务分析</p>
+            </div>
+            <div class="content">$content</div>
+            <div class="footer">由 $appName 生成 • $currentTime</div>
+        </body></html>
+        """.trimIndent()
+    }
+
+    private fun buildFinalJson(json: String, logo: String, name: String, time: String): String {
+        return try {
+            val data = org.json.JSONObject(json)
+            val labels = mapOf(
+                "reportTitle" to "财务全景透视报告",
+                "healthScoreLabel" to "AI 财务健康分",
+                "incomeLabel" to "总收入 (含工资/理财)",
+                "expenseLabel" to "本月总支出",
+                "outlierLabel" to "独秀指数 (Outlier)",
+                "consumeTitle" to "🧩 消费结构分析",
+                "radarTitle" to "🚀 结构画像雷达",
+                "riskTitle" to "<span>⚠️</span> 异常风险",
+                "behaviorTitle" to "🔍 消费画像与行为规律",
+                "conclusionTitle" to "<span>⚖️</span> 综合结论与健康等级",
+                "actionTitle" to "<span>✅</span> 行动清单",
+                "executionTitle" to "✅ 执行优先级",
+                "recordQualityTitle" to "🧭 记录质量提升"
+            )
+            labels.forEach { (k, v) -> data.put(k, v) }
+            data.put("logoBase64", logo)
+            data.put("pageHeaderTitle", "$name • 财务分析")
+            data.put("pageFooter", "由 $name 生成 • $time")
+            data.toString()
+        } catch (e: Exception) {
+            Logger.e(e)
+            "{}"
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun shareAsImage() {
+        val isJsonMode = taskModel?.resultHtml?.trimStart()?.startsWith("{") == true
+        if (isJsonMode) {
+            // ai.html 含 ECharts Canvas，WebView.draw() 无法捕获，改用 html2canvas + JS Bridge
+            val loading = LoadingUtils(requireActivity())
+            exportLoading = loading
+            loading.show(getString(R.string.analysis_generating_image))
+            binding.webView.evaluateJavascript(
+                "if(typeof captureForExport==='function')captureForExport();else if(window.AndroidExport)window.AndroidExport.onCaptureFailed('captureForExport 未定义');",
+                null
+            )
+            return
+        }
+        // 旧版 HTML 无图表，可直接用 draw 截屏
+        val loading = LoadingUtils(requireActivity())
         launch {
             loading.show(getString(R.string.analysis_generating_image))
-
             try {
-                val imageFile = createImageFile()
-                val success = captureWebViewToFile(binding.webView, imageFile)
-
-                if (success) {
-                    shareImageFile(imageFile)
-                } else {
-                    ToastUtils.error(getString(R.string.analysis_image_error, "保存失败"))
+                val file = File(
+                    File(requireContext().cacheDir, "ai").apply { if (!exists()) mkdirs() },
+                    "analysis_${taskId}_${System.currentTimeMillis()}.png"
+                )
+                val bitmap = withContext(Dispatchers.Main) {
+                    val width = binding.webView.width.takeIf { it > 0 }
+                        ?: resources.displayMetrics.widthPixels
+                    val height = (binding.webView.contentHeight * binding.webView.scale).toInt()
+                        .takeIf { it > 0 } ?: binding.webView.height
+                    binding.webView.measure(
+                        View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
+                    )
+                    binding.webView.layout(0, 0, width, height)
+                    val bmp = createBitmap(width, height)
+                    val canvas = Canvas(bmp)
+                    canvas.drawColor(Color.WHITE)
+                    binding.webView.draw(canvas)
+                    bmp
                 }
-
+                withContext(Dispatchers.IO) {
+                    file.outputStream().use {
+                        bitmap.compress(
+                            android.graphics.Bitmap.CompressFormat.PNG,
+                            100,
+                            it
+                        )
+                    }
+                }
+                shareImageFile(file)
             } catch (e: Exception) {
-                Logger.e("生成分享图片失败", e)
-                ToastUtils.error(getString(R.string.analysis_image_error, e.message))
+                Logger.e("分享失败", e)
             } finally {
                 loading.close()
             }
         }
     }
 
-    /**
-     * 截取WebView全量内容并保存为PNG文件
-     */
-    private suspend fun captureWebViewToFile(webView: WebView, outFile: File): Boolean {
-        return try {
-            val bitmap = withContext(Dispatchers.Main) {
-                val display = resources.displayMetrics
-                @Suppress("DEPRECATION") val scale = webView.scale
-                val contentHeightPx = (webView.contentHeight * scale).toInt()
-
-                val width = when {
-                    webView.width > 0 -> webView.width
-                    webView.measuredWidth > 0 -> webView.measuredWidth
-                    else -> display.widthPixels
-                }
-                val height = when {
-                    contentHeightPx > 0 -> contentHeightPx
-                    webView.height > 0 -> webView.height
-                    webView.measuredHeight > 0 -> webView.measuredHeight
-                    else -> display.heightPixels
-                }
-
-                val wSpec = View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY)
-                val hSpec = View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
-                webView.measure(wSpec, hSpec)
-                webView.layout(0, 0, width, height)
-
-                val bmp = createBitmap(width, height)
-                val canvas = Canvas(bmp)
-                canvas.drawColor(Color.WHITE)
-                webView.draw(canvas)
-                bmp
-            }
-
-            val saved = withContext(Dispatchers.IO) {
-                try {
-                    outFile.outputStream().use { os ->
-                        bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, os)
-                    }
-                    true
-                } catch (e: Exception) {
-                    Logger.e("保存截屏文件失败", e)
-                    false
-                } finally {
-                    try {
-                        if (!bitmap.isRecycled) bitmap.recycle()
-                    } catch (_: Throwable) {
-                    }
-                }
-            }
-            saved
-        } catch (e: Exception) {
-            Logger.e("截取WebView异常", e)
-            false
-        }
-    }
-
-    /**
-     * 创建图片文件
-     */
-    private suspend fun createImageFile(): File = withContext(Dispatchers.IO) {
-        val aiCacheDir = File(requireContext().cacheDir, "ai")
-        if (!aiCacheDir.exists()) {
-            aiCacheDir.mkdirs()
-        } else {
-            aiCacheDir.delete()
-            aiCacheDir.mkdirs()
-        }
-        val fileName = "analysis_${taskId}_${System.currentTimeMillis()}.png"
-        File(aiCacheDir, fileName)
-    }
-
-    /**
-     * 分享图片文件
-     */
     private fun shareImageFile(file: File) {
-        try {
-            val uri = FileProvider.getUriForFile(
-                requireContext(),
-                "${requireContext().packageName}.provider",
-                file
-            )
-
-            val shareText = taskModel?.let { "我的${it.title}财务分析报告" } ?: "财务分析报告"
-
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "image/png"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                putExtra(Intent.EXTRA_TEXT, shareText)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-
-            val chooserIntent =
-                Intent.createChooser(intent, getString(R.string.analysis_share_title))
-
-            // 为Intent Chooser中的所有可能的接收应用授予URI权限
-            val packageManager = requireContext().packageManager
-            val resInfoList = packageManager.queryIntentActivities(intent, 0)
-
-            for (resolveInfo in resInfoList) {
-                val packageName = resolveInfo.activityInfo.packageName
-                requireContext().grantUriPermission(
-                    packageName,
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            }
-
-            startActivity(chooserIntent)
-
-        } catch (e: Exception) {
-            Logger.e("分享图片失败", e)
-            ToastUtils.error(getString(R.string.analysis_share_failed))
+        val uri = FileProvider.getUriForFile(
+            requireContext(),
+            "${requireContext().packageName}.provider",
+            file
+        )
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "image/png"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_TEXT, "我的财务分析报告")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            clipData = android.content.ClipData.newRawUri("", uri)
         }
+        val chooser = Intent.createChooser(intent, getString(R.string.analysis_share_title))
+        chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        startActivity(chooser)
     }
 
-    /**
-     * 获取应用logo的base64编码
-     */
     private fun getAppLogoBase64(): String {
         return try {
-            // 获取应用logo drawable
-            val drawable = requireContext().getDrawable(R.mipmap.ic_launcher)
-            if (drawable != null) {
-                // 转换为bitmap
-                val bitmap = if (drawable is android.graphics.drawable.BitmapDrawable) {
-                    drawable.bitmap
-                } else {
-                    val width = drawable.intrinsicWidth.takeIf { it > 0 } ?: 48
-                    val height = drawable.intrinsicHeight.takeIf { it > 0 } ?: 48
-                    val bitmap = createBitmap(width, height)
-
-                    val canvas = Canvas(bitmap)
-                    drawable.setBounds(0, 0, canvas.width, canvas.height)
-                    drawable.draw(canvas)
-                    bitmap
-                }
-
-                // 转换为base64
-                val outputStream = ByteArrayOutputStream()
-                bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, outputStream)
-                val byteArray = outputStream.toByteArray()
-                "data:image/png;base64," + Base64.encodeToString(byteArray, Base64.NO_WRAP)
-            } else {
-                "" // 如果获取失败，返回空字符串
-            }
+            val drawable = requireContext().getDrawable(R.mipmap.ic_launcher) ?: return ""
+            val bitmap = createBitmap(drawable.intrinsicWidth, drawable.intrinsicHeight)
+            val canvas = Canvas(bitmap)
+            drawable.setBounds(0, 0, canvas.width, canvas.height)
+            drawable.draw(canvas)
+            val os = ByteArrayOutputStream()
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, os)
+            "data:image/png;base64," + Base64.encodeToString(os.toByteArray(), Base64.NO_WRAP)
         } catch (e: Exception) {
-            Logger.e("获取应用logo失败", e)
-            "" // 出错时返回空字符串
+            ""
         }
     }
-
-    /**
-     * 将AI生成的内容转换为HTML
-     */
-    private fun convertToHtml(content: String): String {
-        val appName = getString(R.string.app_name)
-        val logoBase64 = getAppLogoBase64()
-
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          
-            <meta name="color-scheme" content="light dark">
-            <style>
-              
-                :root {
-                 
-                    --text-primary: #1f2937;          /* 浅色主文本（更稳的深灰） */
-                    --text-secondary: #6b7280;        /* 浅色次文本 */
-                }
-                @media (prefers-color-scheme: dark) {
-                    :root {
-                      
-                        --text-primary: #e5e7eb;      /* 深色主文本（近 Gray-200） */
-                        --text-secondary: #9ca3af;    /* 深色次文本（Gray-400） */
-                    }
-                }
-                body{
-                    padding:1.5rem
-                }
-
-
-                /* 顶部页眉：左侧小 Logo + 周期标题 */
-                .header {
-                    display: flex;
-                    align-items: center;
-                    gap: 12px;
-                    padding: 1.5rem;
-                }
-                .logo {
-                    display: inline-flex;
-                    align-items: center;
-                    justify-content: center;
-                }
-                .logo img {
-                    width: 28px;
-                    height: 28px;
-                    border-radius: 6px;
-                }
-                .logo .emoji {
-                    font-size: 20px;
-                    line-height: 1;
-                }
-                .period-title {
-                    font-size: 18px;
-                    font-weight: 600;
-                    color: var(--text-primary);
-                    margin: 0;
-                }
-                
-                .footer {
-                    text-align: center;
-                        padding:1.5rem;
-                    color: var(--text-secondary);
-                    font-size: 14px;
-                }
-               
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <!-- 顶部页眉：左侧小 Logo，不显示应用标题，仅显示周期标题 -->
-                <div class="header">
-                    <div class="logo">${if (logoBase64.isNotEmpty()) "<img src=\"$logoBase64\" alt=\"Logo\">" else "<span class=\"emoji\">💰</span>"}</div>
-                    <p class="period-title">自动记账 • 财务分析</p>
-                </div>
-                
-                <!-- AI分析内容 -->
-                <div class="content">
-                    ${content}
-                </div>
-                
-                <!-- 底部信息 -->
-                <div class="footer">
-                    由 $appName 生成 • ${
-            SimpleDateFormat(
-                "yyyy-MM-dd HH:mm",
-                Locale.getDefault()
-            ).format(Date())
-        }
-                </div>
-            </div>
-        </body>
-        </html>
-        """.trimIndent()
-    }
-
-    /**
-     * 显示错误信息
-     */
-    private fun showError(message: String) {
-        if (!uiReady()) return
-        binding.statusPage.showError()
-    }
-} 
+}

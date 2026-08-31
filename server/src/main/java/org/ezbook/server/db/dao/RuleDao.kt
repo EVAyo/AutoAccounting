@@ -27,7 +27,7 @@ interface RuleDao {
     @Query(
         """
     SELECT * FROM RuleModel 
-    WHERE app = :app 
+    WHERE (:app IS NULL OR app = :app )
     AND (:type IS NULL OR type = :type)
     AND (:searchTerm IS NULL OR name LIKE '%' || :searchTerm || '%')
     AND (:creator IS NULL OR :creator = '' OR creator = :creator)
@@ -39,7 +39,7 @@ interface RuleDao {
     suspend fun loadByAppAndFilters(
         limit: Int,
         offset: Int,
-        app: String,
+        app: String? = null,
         type: String? = null,
         searchTerm: String? = null,
         creator: String? = null
@@ -49,9 +49,21 @@ interface RuleDao {
     @Query("SELECT * FROM RuleModel WHERE app = :app AND type = :type AND enabled = 1")
     suspend fun loadAllEnabled(app: String, type: String): List<RuleModel>
 
+    //查询所有禁用的规则，用于命中即丢弃的场景
+    @Query("SELECT * FROM RuleModel WHERE app = :app AND type = :type AND enabled = 0")
+    suspend fun loadAllDisabled(app: String, type: String): List<RuleModel>
+
     //按创建者查询所有启用的规则（系统/用户），用于JS执行
     @Query("SELECT * FROM RuleModel WHERE app = :app AND type = :type AND enabled = 1 AND creator = :creator")
     suspend fun loadAllEnabledByCreator(app: String, type: String, creator: String): List<RuleModel>
+
+    //按创建者查询所有禁用的规则（系统/用户），用于命中即丢弃的场景
+    @Query("SELECT * FROM RuleModel WHERE app = :app AND type = :type AND enabled = 0 AND creator = :creator")
+    suspend fun loadAllDisabledByCreator(
+        app: String,
+        type: String,
+        creator: String
+    ): List<RuleModel>
 
 
     @Insert

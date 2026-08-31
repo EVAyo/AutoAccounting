@@ -1,63 +1,53 @@
 package net.ankio.auto.service
 
-import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
-import android.hardware.SensorManager
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.util.Base64
+import androidx.core.graphics.scale
 import androidx.lifecycle.lifecycleScope
+import com.google.android.accessibility.selecttospeak.SelectToSpeakService
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import net.ankio.auto.BuildConfig
+import net.ankio.auto.R
 import net.ankio.auto.constant.WorkMode
 import net.ankio.auto.http.api.JsAPI
+import net.ankio.auto.service.OcrService.Companion.OCR_MAX_SHORT_EDGE
 import net.ankio.auto.service.api.ICoreService
 import net.ankio.auto.service.api.IService
-import net.ankio.auto.service.ocr.FlipDetector
+import net.ankio.auto.service.ocr.OcrTools
 import net.ankio.auto.service.ocr.OcrViews
+import net.ankio.auto.service.ocr.PageSignatureManager
 import net.ankio.auto.service.overlay.SaveProgressView
-import net.ankio.shell.Shell
 import net.ankio.auto.storage.Logger
+import net.ankio.auto.ui.dialog.RememberPageDialog
+import net.ankio.auto.ui.utils.DisplayUtils
 import net.ankio.auto.utils.PrefManager
-import net.ankio.auto.ui.utils.ToastUtils
 import net.ankio.ocr.OcrProcessor
 import org.ezbook.server.constant.DataType
 import org.ezbook.server.constant.LogLevel
 import org.ezbook.server.intent.IntentType
+import org.ezbook.server.models.BillResultModel
+import org.ezbook.server.models.ResultModel
 import org.ezbook.server.tools.runCatchingExceptCancel
 import java.io.File
 
 /**
- * OCR服务类，用于实现屏幕文字识别功能
- * 主要功能：
- * 1. 监听设备翻转事件（从朝下翻转到朝上）
- * 2. 截取屏幕内容
- * 3. 进行OCR文字识别
- * 4. 显示识别动画界面
+ * OCR 服务：截取屏幕并完成 OCR / AI 分析。
+ *
+ * **双击背部触发**由独立子服务 [BackTapOcrTriggerService] 负责，通过 OCR Intent 与本服务协作。
  */
 class OcrService : ICoreService() {
 
     // OCR处理器
     private lateinit var ocrProcessor: OcrProcessor
     private var saveProgressView: SaveProgressView? = null
-
-    // 翻转检测器，当设备从朝下翻转到朝上时触发OCR
-    private val detector by lazy {
-        FlipDetector(coreService.getSystemService(Context.SENSOR_SERVICE) as SensorManager) {
-            coreService.lifecycleScope.launch {
-                // 传感器触发：非手动
-                triggerOcr(false)
-            }
-        }
-    }
-
-    private val shell = Shell(BuildConfig.APPLICATION_ID)
 
     private val ocrView = OcrViews()
 
@@ -71,28 +61,20 @@ class OcrService : ICoreService() {
         ocrProcessor = OcrProcessor().debug(PrefManager.debugMode).attach(coreService)
             .log { string, type -> Logger.log(LogLevel.fromAndroidLevel(type), string) }
 
-        if (WorkMode.isOcr()) {
-            // 启动翻转检测
-            if (!detector.start()) {
-                Logger.e("设备不支持重力/加速度传感器")
-            }
-        }
-
         serverStarted = true
-        Logger.d("OCR服务初始化成功，等待触发")
+        Logger.i("OCR service initialized")
 
         if (WorkMode.isOcrOrLSPatch()) {
             saveProgressView = SaveProgressView()
             saveProgressView?.show(this)
-            Logger.d("Ocr 或 LSPatch模式，使用1px悬浮窗保活")
         }
+
+
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) {
 
         if (intent?.getStringExtra("intentType") == IntentType.OCR.name) {
-            Logger.d("收到Intent启动OCR请求")
-            //延迟1秒启动，等activity退出
             coreService.lifecycleScope.launch {
                 val manual = intent.getBooleanExtra("manual", false)
                 triggerOcr(manual)
@@ -105,13 +87,13 @@ class OcrService : ICoreService() {
      * 服务销毁时的清理工作
      */
     override fun onDestroy() {
-        detector.stop()
-
-        shell.close()
-        // 确保悬浮窗被清理
-        ocrView.stopOcrView()
+        // 释放 OCR 引擎资源，确保跟随服务生命周期关闭。
+        ocrProcessor.close()
+        // 确保状态横幅被清理
+        ocrView.dismiss()
 
         saveProgressView?.destroy()
+
     }
 
     /* -------------------------------- 业务逻辑 ------------------------------- */
@@ -135,239 +117,347 @@ class OcrService : ICoreService() {
                 coreService.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
             }
 
-            // 检查设备是否支持振动
             if (!vibrator.hasVibrator()) {
-                Logger.d("设备不支持振动功能")
+                Logger.w("Device does not support vibration")
                 return
             }
 
-            // 创建振动效果
-            // Android 8.0+ 使用VibrationEffect
             val vibrationEffect =
                 VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE)
             vibrator.vibrate(vibrationEffect)
-
-            Logger.d("振动反馈已触发")
         } catch (e: Exception) {
-            Logger.e("振动反馈失败: ${e.message}")
+            Logger.e("Vibration failed", e)
         }
     }
 
     /**
      * 触发OCR识别
-     * 支持多种触发方式：设备翻转、Intent、磁贴等
+     * 支持多种触发方式：双击背部、Intent、磁贴等
+     * 所有异常和状态通过顶部横幅展示。
      */
     private suspend fun triggerOcr(manual: Boolean) {
         if (ocrDoing) {
-            Logger.d("OCR正在处理中，跳过本次请求")
+            Logger.d("[TapBack→OCR] skip: pipeline busy (ocrDoing=true) manual=$manual")
             return
         }
 
-        // 先进入忙碌状态并触发振动反馈，再进行后续检测
-        ocrDoing = true
-        triggerVibration()
+        val keyguardManager =
+            coreService.getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+        if (keyguardManager.isKeyguardLocked) {
+            Logger.d("[TapBack→OCR] skip: keyguard locked manual=$manual")
+            return
+        }
 
-        // 解析前台应用包名：
-        // - 手动触发：不走白名单，只读取当前前台应用（获取失败则用应用自身包名占位）
-        // - 自动触发：严格校验白名单
-        val packageName = if (manual) {
-            getTopPackagePostL() ?: run {
-                ocrDoing = false
-                return
-            }
-        } else {
-            validateForegroundApp() ?: run {
+        if (PrefManager.landscapeDnd && DisplayUtils.isWindowLandscape(coreService)) {
+            Logger.d("[TapBack→OCR] skip: landscape DND enabled manual=$manual")
+            return
+        }
+
+        if (!OcrTools.requestPermission()) {
+            Logger.d("[TapBack→OCR] skip: accessibility not ready manual=$manual")
+            if (manual) ocrView.showError(
+                coreService,
+                coreService.getString(R.string.ocr_error_accessibility_not_ready)
+            )
+            ocrDoing = false
+            return
+        }
+
+        ocrDoing = true
+        OcrTools.collapseStatusBar()
+        val pkg = OcrTools.getTopApp() ?: run {
+            Logger.d("[TapBack→OCR] skip: getTopApp() null (no foreground package) manual=$manual")
+            if (manual) ocrView.showError(
+                coreService,
+                coreService.getString(R.string.ocr_error_no_foreground_app)
+            )
+            ocrDoing = false
+            return
+        }
+
+        val packageName = when {
+            manual -> pkg
+            pkg in PrefManager.appWhiteList -> pkg
+            else -> {
+                Logger.d(
+                    "[TapBack→OCR] skip: package not in whitelist pkg=$pkg manual=$manual " +
+                            "(double-tap only runs OCR for whitelisted apps)",
+                )
                 ocrDoing = false
                 return
             }
         }
 
-        Logger.d("检测到白名单应用 [$packageName]，开始OCR")
-
-        // 执行OCR流程
+        triggerVibration()
+        Logger.i("[TapBack→OCR] proceed: pkg=$packageName manual=$manual")
         executeOcrFlow(packageName, manual)
     }
 
     /**
-     * 验证前台应用是否在白名单中
-     * @return 有效的包名，如果无效则返回null
-     */
-    private suspend fun validateForegroundApp(): String? {
-        val pkg = getTopPackagePostL() ?: run {
-            Logger.w("无法获取前台应用")
-            return null
-        }
-
-        if (pkg !in PrefManager.appWhiteList) {
-            Logger.d("前台应用 $pkg 不在监控白名单")
-            return null
-        }
-
-        return pkg
-    }
-
-    /**
      * 执行OCR识别的完整流程
+     *
+     * 关键顺序：先截图（屏幕干净），再弹横幅告知用户进度。
+     * 所有错误和结果均通过横幅展示，不使用 Toast。
+     * @param manual 是否手动触发，手动且识别成功时弹窗询问是否记住此页面
      */
-    private fun executeOcrFlow(packageName: String, manual: Boolean) {
+    private fun executeOcrFlow(packageName: String, manual: Boolean = false) {
 
         coreService.lifecycleScope.launch {
             val startTime = System.currentTimeMillis()
             try {
-                Logger.d("开始OCR流程")
-                // 显示OCR界面
-                ocrView.startOcrView(coreService)
+                val structFp = SelectToSpeakService.structFp ?: ""
+                // 1. 先在IO线程截图（视觉模式返回图片Base64，规则模式返回OCR文本）
+                val useVision = PrefManager.aiVisionRecognition
+                val data = withContext(Dispatchers.IO) { performOcrCapture(useVision) }
+                    ?: return@launch  // performOcrCapture 内部已通过横幅展示错误
 
+                if (!useVision && !AnalysisUtils.inWhitelist(data)) {
+                    Logger.d("OCR text filtered by keyword rules")
+                    ocrView.showError(
+                        coreService,
+                        coreService.getString(R.string.ocr_error_keyword_filtered)
+                    )
+                    return@launch
+                }
 
-                // 执行截图和识别
+                Logger.d("OCR data length: ${data.length}")
 
-                withContext(Dispatchers.IO) {
-                    val ocrResult = performOcrCapture()
-                    // 处理识别结果
-                    if (ocrResult != null) {
-                        if (PrefManager.dataFilter.any { !ocrResult.contains(it) }) {
-                            Logger.d("识别文本长度: ${ocrResult.length}")
-                            // 手动触发 → 强制AI识别
-                            send2JsEngine(ocrResult, packageName, forceAI = manual)
-                        } else {
-                            Logger.d("数据信息不在识别关键字里面，忽略")
-                        }
-                    } else {
-                        Logger.d("识别结果为空，跳过处理")
-                    }
+                // 2. 更新横幅：正在AI识别
+                ocrView.updateStatus(coreService.getString(R.string.ocr_status_ai_analyzing))
+
+                // 3. 发送给JS引擎（视觉模式传图，规则模式传文本）
+                val result = withContext(Dispatchers.IO) {
+                    send2JsEngine(data, packageName, manual)
                 }
 
                 val totalTime = System.currentTimeMillis() - startTime
-                Logger.d("OCR处理完成，总耗时: ${totalTime}ms")
+                Logger.d("OCR completed in ${totalTime}ms")
+
+                // 4. 在横幅上显示最终结果（展示服务端返回的具体信息）
+                val billData = result.data
+                if (billData != null) {
+                    val moneyText = String.format("¥%.2f", billData.billInfoModel.money)
+
+                    ocrView.showSuccess(coreService, moneyText) {
+                        if (PrefManager.ocrAccessibilityAutoTrigger) {
+                            val activityName = SelectToSpeakService.topActivity ?: ""
+                            showRememberPageDialog(structFp, packageName, activityName)
+                        }
+                    }
+                } else {
+                    ocrView.showError(coreService, result.msg)
+                }
 
             } catch (e: Exception) {
-                Logger.e("OCR处理异常: ${e.message}")
+                Logger.e("OCR flow error", e)
+                ocrView.dismiss()
             } finally {
-                ocrView.stopOcrView()
                 ocrDoing = false
+                // 常驻后台关闭时，OCR 结束后停止无障碍服务
+                if (!PrefManager.ocrAccessibilityKeepAlive) {
+                    SelectToSpeakService.instance?.disableSelf()
+                }
             }
         }
 
     }
+    /**
+     * 展示记住页面弹窗
+     * 若已有匹配规则则不再弹窗。Service 环境下 BaseSheetDialog 自动使用悬浮窗模式
+     */
+    private fun showRememberPageDialog(
+        structFp: String,
+        packageName: String,
+        activityName: String,
+    ) {
+        if (PageSignatureManager.matches(packageName, activityName, structFp)) return
+        coreService.lifecycleScope.launch {
+            withContext(Dispatchers.Main) {
+                RememberPageDialog.show(
+                    context = coreService,
+                    packageName = packageName,
+                    activityName = activityName,
+                    structureFingerprint = structFp,
+                )
+            }
+        }
+    }
+
 
     /**
-     * 执行屏幕截图和OCR识别
-     * @return 识别出的文本，如果失败则返回null
+     * 执行屏幕截图，可选 OCR 识别
+     *
+     * 流程：截图 → 弹横幅 → 压缩 → [useVision=false 时 OCR] → 返回结果
+     * @param useVision 为 true 时跳过 OCR，仅返回图片 Base64；否则返回 OCR 文本
+     * @return 视觉模式返回图片 Base64，规则模式返回 OCR 文本，失败返回 null
      */
-    private suspend fun performOcrCapture(): String? {
+    private suspend fun performOcrCapture(useVision: Boolean): String? {
         val captureStartTime = System.currentTimeMillis()
 
-        // 截图输出路径（外部缓存）
+        // 截图输出路径
         val outFile = File(coreService.externalCacheDir, "screen.png")
-        if (outFile.exists()) {
-            outFile.delete()
-        }
-        // 通过 Shell 执行系统截图
+        if (outFile.exists()) outFile.delete()
+
+        // 通过 OcrTools 执行截图（根据授权方式分别调用 Root/Shizuku/无障碍）
         runCatchingExceptCancel {
-            shell.exec("service call statusbar 2")
-            delay(300)
-            shell.exec("screencap -p ${outFile.absolutePath}")
+            val success = OcrTools.takeScreenshot(outFile)
+            if (!success) throw IllegalStateException("Screenshot failed")
         }.onFailure {
-            // 提醒用户未授权root或者shizuku未运行（使用资源字符串，避免硬编码）
-            ToastUtils.info(coreService.getString(net.ankio.auto.R.string.toast_shell_not_ready))
             Logger.e(it.message ?: "", it)
+
+            withContext(Dispatchers.Main) {
+                ocrView.showError(
+                    coreService,
+                    coreService.getString(R.string.ocr_error_capture_failed)
+                )
+            }
             return null
         }
 
         val captureTime = System.currentTimeMillis() - captureStartTime
-        Logger.d("截图耗时: ${captureTime}ms")
+        Logger.d("Screenshot captured in ${captureTime}ms")
 
-        // 解码并识别
+        withContext(Dispatchers.Main) {
+            ocrView.show(
+                coreService,
+                coreService.getString(R.string.ocr_status_processing_screenshot)
+            )
+        }
+
+        // 解码截图
         val bitmap = BitmapFactory.decodeFile(outFile.absolutePath)
         if (bitmap == null) {
-            Logger.e("截图解码失败")
+            Logger.e("Failed to decode screenshot")
             outFile.delete()
+            withContext(Dispatchers.Main) {
+                ocrView.showError(
+                    coreService,
+                    coreService.getString(R.string.ocr_error_capture_failed)
+                )
+            }
             return null
         }
 
-        val text = runCatching { ocrProcessor.startProcess(bitmap) }.getOrElse {
-            Logger.e("OCR 识别失败: ${it.message}")
-            outFile.delete()
-            bitmap.recycle()
-            return null
+        // 裁剪状态栏区域
+        val croppedBitmap = cropScreenshotTop(bitmap).also { cropped ->
+            if (cropped !== bitmap) bitmap.recycle()
         }
 
-        bitmap.recycle()
+        // 缩小图片加速 OCR（短边缩到 OCR_MAX_SHORT_EDGE，像素量大幅减少）
+        val (srcW, srcH) = croppedBitmap.width to croppedBitmap.height
+        val scaledBitmap = scaleDownForOcr(croppedBitmap).also { scaled ->
+            if (scaled !== croppedBitmap) croppedBitmap.recycle()
+        }
+        Logger.d("Image scaled: ${srcW}x${srcH} -> ${scaledBitmap.width}x${scaledBitmap.height}")
+
+        // 将缩小后的图片编码为 JPEG Base64（供后续存储/发AI）
+        val imageBase64 = bitmapToBase64(scaledBitmap)
+
+        val text = if (useVision) {
+            ""
+        } else {
+            // 截图完成，显示顶部横幅"正在OCR识别"（截图干净，不会被污染）
+            withContext(Dispatchers.Main) {
+                ocrView.show(coreService, coreService.getString(R.string.ocr_status_recognizing))
+            }
+            // 规则模式：需 OCR 文本做规则匹配
+            runCatching {
+                ocrProcessor.startProcess(scaledBitmap)
+            }.getOrElse {
+                Logger.e("OCR recognition failed: ${it.message}")
+                outFile.delete()
+                scaledBitmap.recycle()
+                withContext(Dispatchers.Main) {
+                    ocrView.showError(
+                        coreService,
+                        coreService.getString(R.string.ocr_error_ocr_failed)
+                    )
+                }
+                return null
+            }.also {
+                // 识别结果为空
+                if (it.isBlank()) {
+                    withContext(Dispatchers.Main) {
+                        ocrView.showError(
+                            coreService,
+                            coreService.getString(R.string.ocr_error_empty_result)
+                        )
+                    }
+                    outFile.delete()
+                    return null
+                }
+            }
+        }
+
+        scaledBitmap.recycle()
         outFile.delete()
-        return text.ifBlank { null }
+
+        return if (useVision) "data:image/png;base64,${imageBase64}" else text
     }
 
+    /**
+     * 缩小 Bitmap 加速 OCR：短边不超过 [OCR_MAX_SHORT_EDGE]。
+     * 对于 OCR 文字识别，720px 短边足够清晰，像素量比 1440p 减少 75%。
+     * @return 缩小后的 Bitmap，如果已足够小则原样返回
+     */
+    private fun scaleDownForOcr(source: Bitmap): Bitmap {
+        val shortSide = minOf(source.width, source.height)
+        if (shortSide <= OCR_MAX_SHORT_EDGE) return source
+
+        val scale = OCR_MAX_SHORT_EDGE.toFloat() / shortSide
+        val newW = (source.width * scale).toInt()
+        val newH = (source.height * scale).toInt()
+        return source.scale(newW, newH)
+    }
 
     /**
-     * 将识别文本交给 JS 引擎做规则识别。
-     * 成功：静默（不打扰用户）。
-     * 失败：统一 toast 提示（避免多处 if 分支）。
-     * @return true 表示识别成功；false 表示未匹配到规则。
+     * 将 Bitmap 压缩为 JPEG 并编码为 Base64
+     * @param bitmap 位图（不回收，调用方负责）
+     * @return Base64 字符串
+     */
+    private fun bitmapToBase64(bitmap: Bitmap): String {
+        val stream = java.io.ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 60, stream)
+        return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+    }
+
+    /**
+     * 裁剪截图顶部区域，移除系统导航栏与状态栏。
+     * @param source 原始截图
+     * @return 去掉顶部导航栏后的位图
+     */
+    private fun cropScreenshotTop(source: Bitmap): Bitmap {
+        val cropHeight = DisplayUtils.getStatusBarHeight(coreService)
+        if (cropHeight <= 0) return source
+        if (source.height <= cropHeight) return source
+        return Bitmap.createBitmap(source, 0, cropHeight, source.width, source.height - cropHeight)
+    }
+    /**
+     * 将识别结果交给 JS 引擎做规则/AI 识别。
+     * 开启视觉识别时传 image，body 为 data:image/xxx;base64,xxx，服务端据此识别为图片。
      */
     private suspend fun send2JsEngine(
         text: String,
         app: String,
-        forceAI: Boolean = false
-    ): Boolean {
-        Logger.d("app=$app, text=$text")
-        val billResult = JsAPI.analysis(
+        manual: Boolean = false
+    ): ResultModel<BillResultModel> {
+        val useVision = PrefManager.aiVisionRecognition
+        Logger.d("app=$app, text=${text.take(80)}..., useVision=$useVision, manual=$manual")
+        val result = JsAPI.analysis(
             DataType.OCR,
             text,
             app,
             fromAppData = false,
-            forceAI = forceAI
+            manual = manual,
         )
 
-        return if (billResult == null) {
-            // 未匹配到规则 → 明确提示用户
-            ToastUtils.error(net.ankio.auto.R.string.no_rule_hint)
-            false
+        if (result.data != null) {
+            Logger.i("Bill recognized: ${result.data?.billInfoModel}")
         } else {
-            // 成功：仅记录日志，不打扰用户
-            Logger.d("识别结果：${billResult.billInfoModel}")
-            true
+            Logger.w("Analysis failed(${result.code}): ${result.msg}")
         }
+        return result
     }
-
-    /**
-     * 获取当前前台应用包名
-     * @return 返回最近使用的应用包名
-     */
-    private suspend fun getTopPackagePostL(): String? {
-        // 解析顺序：
-        // 1) topResumedActivity（最准确）
-        // 2) ResumedActivity（其次）
-        // 3) mCurrentFocus（窗口焦点，可能为null）
-        val commands = listOf(
-            "dumpsys activity activities | grep topResumedActivity",
-            "dumpsys activity activities | grep ResumedActivity",
-            "dumpsys window | grep mCurrentFocus"
-        )
-
-        for (cmd in commands) {
-            val output = runCatchingExceptCancel { shell.exec(cmd) }.getOrNull()
-            if (output.isNullOrBlank()) continue
-
-            // 直接在整段输出内提取一次即可，无需逐行。
-            val pkg = extractPackageFromDumpsysLine(output)
-            if (!pkg.isNullOrBlank()) return pkg
-        }
-        return null
-    }
-
-    /**
-     * 从一行文本中提取包名：先找 '/'，再向前找空白，二者之间即包名。
-     */
-    private fun extractPackageFromDumpsysLine(line: String): String? {
-        val slashIndex = line.indexOf('/')
-        if (slashIndex <= 0) return null
-        var start = slashIndex - 1
-        while (start >= 0 && !line[start].isWhitespace()) start--
-        if (start + 1 >= slashIndex) return null
-        val pkg = line.substring(start + 1, slashIndex)
-        return pkg.takeIf { it.isNotBlank() && it.contains('.') }
-    }
-
 
     companion object : IService {
 
@@ -378,7 +468,7 @@ class OcrService : ICoreService() {
          * 检查是否有使用情况访问权限
          */
         override fun hasPermission(): Boolean {
-            return true
+            return OcrTools.hasPermission()
         }
 
         /**
@@ -388,9 +478,14 @@ class OcrService : ICoreService() {
 
         }
 
+        /**
+         * OCR 识别时图片短边最大值（px）。
+         * 720px 对文字识别足够清晰，像素量比 1440p 减少约 75%，OCR 速度显著提升。
+         */
+        private const val OCR_MAX_SHORT_EDGE = 720
+
     }
 }
-
 
 
 

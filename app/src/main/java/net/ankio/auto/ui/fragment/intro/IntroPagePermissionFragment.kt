@@ -9,22 +9,28 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.View
 import android.widget.ImageView
-import androidx.activity.result.ActivityResultLauncher
 import androidx.annotation.DrawableRes
 import androidx.annotation.StringRes
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import com.google.android.accessibility.selecttospeak.SelectToSpeakService
 import net.ankio.auto.ui.theme.DynamicColors
 import net.ankio.auto.R
 import net.ankio.auto.constant.WorkMode
 import net.ankio.auto.databinding.FragmentIntroPagePermissionBinding
 import net.ankio.auto.service.NotificationService
 import net.ankio.auto.service.SmsReceiver
+import net.ankio.auto.service.ocr.OcrTools
 import net.ankio.auto.ui.adapter.IntroPagerAdapter
 import net.ankio.auto.ui.components.ExpandableCardView
 import net.ankio.auto.ui.utils.ToastUtils
+import net.ankio.auto.utils.PrefManager
+import net.ankio.auto.utils.SystemUtils
 import net.ankio.auto.xposed.XposedModule
-import net.ankio.shell.Shell
 import net.ankio.auto.service.OverlayService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 引导页 #3 – 权限申请
@@ -62,9 +68,9 @@ class IntroPagePermissionFragment : BaseIntroPageFragment<FragmentIntroPagePermi
      * @param viewId 权限项视图ID
      */
     data class PermItem(
-        @DrawableRes val iconRes: Int,
-        @StringRes val titleRes: Int,
-        @StringRes val descRes: Int,
+        @param:DrawableRes val iconRes: Int,
+        @param:StringRes val titleRes: Int,
+        @param:StringRes val descRes: Int,
         val checkGranted: () -> Boolean,        // 检查权限的方法
         val onClick: () -> Unit,                 // 点击跳转的方法
         val isRequired: Boolean = true,          // 是否为必需权限，默认为必需
@@ -74,9 +80,6 @@ class IntroPagePermissionFragment : BaseIntroPageFragment<FragmentIntroPagePermi
     // 权限项列表：默认初始化为空，避免 lateinit 未初始化访问导致崩溃
     private var perms: MutableList<PermItem> = mutableListOf()
 
-    // 屏幕投影权限请求启动器
-    private lateinit var projLauncher: ActivityResultLauncher<Unit>
-
     /**
      * 动态设置权限卡片
      * 根据当前工作模式（Xposed/普通）创建不同的权限申请项
@@ -84,7 +87,6 @@ class IntroPagePermissionFragment : BaseIntroPageFragment<FragmentIntroPagePermi
     private fun setupCardsDynamic() {
         val container = binding.cardGroup
         val ctx = requireContext()
-        val isXposed = WorkMode.isXposed()
 
         // 构建权限列表
         perms = mutableListOf<PermItem>().apply {
@@ -99,37 +101,33 @@ class IntroPagePermissionFragment : BaseIntroPageFragment<FragmentIntroPagePermi
                 )
             )
 
-            // 非Xposed模式下添加额外权限
-            if (!isXposed) {
-                // Root 或 Shizuku 权限（必需）
+            // OCR 权限（可选）：仅 OCR 模式需要无障碍
+            if (WorkMode.isOcr()) {
                 add(
                     PermItem(
                         iconRes = R.drawable.icon_proactive,
-                        titleRes = R.string.perm_shell_title,
-                        descRes = R.string.perm_shell_desc,
+                        titleRes = R.string.perm_ocr_perm_accessibility,
+                        descRes = R.string.ocr_auth_accessibility_description,
                         checkGranted = {
-                            // 可用即视为已授予：root 可用或 Shizuku 可用
-                            try {
-                                Shell(ctx.packageName).use { it.checkPermission() }
-                            } catch (_: Throwable) {
-                                false
-                            }
+                            SystemUtils.isAccessibilityServiceEnabled(
+                                SelectToSpeakService::class.java
+                            )
                         },
                         onClick = {
-                            // 触发一次权限请求尝试（Shizuku 会弹权限；root 依赖 su 管理器弹窗）
-                            try {
-                                Shell(ctx.packageName).use { it.requestPermission() }
-                            } catch (_: Throwable) {
-                                // 提醒用户未授权root或者shizuku未运行（使用资源字符串，避免硬编码）
-                                ToastUtils.info(getString(R.string.toast_shell_not_ready))
-
+                            lifecycleScope.launch {
+                                if (OcrTools.requestPermission()) {
+                                    refreshCardStates()
+                                }
                             }
-                        }
+                        },
+                        isRequired = false
                     )
                 )
+            }
 
-
-                // 短信权限（OCR模式下为可选）
+            // 非Xposed模式下添加可选权限
+            if (!WorkMode.isXposed()) {
+                // 短信权限（可选）
                 add(
                     PermItem(
                         iconRes = R.drawable.ic_sms,
@@ -196,6 +194,7 @@ class IntroPagePermissionFragment : BaseIntroPageFragment<FragmentIntroPagePermi
             p.viewId = View.generateViewId()
             val card = ExpandableCardView(requireContext()).apply {
                 icon.setImageResource(p.iconRes)
+
                 // 为可选权限添加"（可选）"标识
                 val titleText = if (p.isRequired) {
                     context.getString(p.titleRes)
@@ -213,12 +212,27 @@ class IntroPagePermissionFragment : BaseIntroPageFragment<FragmentIntroPagePermi
 
     override fun onResume() {
         super.onResume()
-        // 构建权限卡片，确保 perms 已初始化，避免按钮点击过早导致崩溃
         setupCardsDynamic()
-        // 刷新所有权限的授予状态
-        perms.forEach {
-            val card = binding.cardGroup.findViewById<ExpandableCardView>(it.viewId)
-            setState(card, it.checkGranted(), it.isRequired)
+        refreshCardStates()
+    }
+
+    /**
+     * 刷新所有权限卡片的状态图标
+     * 权限检查可能阻塞（Shell 探测等），放到 IO 协程执行
+     */
+    private fun refreshCardStates() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val results = withContext(Dispatchers.IO) {
+                perms.map { it.checkGranted() to it.isRequired }
+            }
+            if (!isAdded) return@launch
+            perms.forEachIndexed { i, p ->
+                val card = binding.cardGroup.findViewById<ExpandableCardView>(p.viewId)
+                if (i < results.size && card != null) {
+                    val (granted, required) = results[i]
+                    setState(card, granted, required)
+                }
+            }
         }
     }
 
@@ -238,7 +252,13 @@ class IntroPagePermissionFragment : BaseIntroPageFragment<FragmentIntroPagePermi
             // 如果有可选权限未授予，给出提示但仍允许继续
             if (optionalGrantedCount < optionalPerms.size) {
                 val missingOptional = optionalPerms.size - optionalGrantedCount
-                ToastUtils.info(getString(R.string.perm_optional_missing_hint, missingOptional))
+                ToastUtils.info(
+                    resources.getQuantityString(
+                        R.plurals.perm_optional_missing_hint,
+                        missingOptional,
+                        missingOptional
+                    )
+                )
             }
             vm.pageRequest.value = IntroPagerAdapter.IntroPage.KEEP
         } else {

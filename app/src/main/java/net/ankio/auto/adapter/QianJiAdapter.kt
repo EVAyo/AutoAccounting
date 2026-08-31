@@ -31,11 +31,15 @@ import java.util.Date
 import java.util.Locale
 import androidx.core.net.toUri
 import net.ankio.auto.App
+import net.ankio.auto.adapter.AppAdapterManager.bookSize
 import net.ankio.auto.constant.WorkMode
+import net.ankio.auto.http.api.BillAPI
+import net.ankio.auto.http.api.BookNameAPI
 import net.ankio.auto.utils.PrefManager
 import net.ankio.auto.utils.SystemUtils
 import net.ankio.auto.storage.Logger
 import org.ezbook.server.constant.BillAction
+import org.ezbook.server.constant.DefaultData
 
 class QianJiAdapter : IAppAdapter {
     override val pkg: String
@@ -53,46 +57,17 @@ class QianJiAdapter : IAppAdapter {
         get() = "钱迹"
 
 
-    /**
-     * 检查指定账户是否为信用卡类型
-     * @param accountName 账户名称
-     * @return 是否为信用卡账户
-     */
-    private fun isCreditAccount(accountName: String): Boolean = runBlocking {
-        if (accountName.isEmpty()) return@runBlocking false
-
-        // 首先通过名称进行简单判断
-        val nameBasedCheck = accountName.contains("信用", ignoreCase = true) ||
-                accountName.contains("credit", ignoreCase = true) ||
-                accountName.contains("花呗", ignoreCase = true) ||
-                accountName.contains("白条", ignoreCase = true)
-
-        if (nameBasedCheck) return@runBlocking true
-
-        // 如果启用了资产管理，则查询资产类型
-        if (PrefManager.featureAssetManage) {
-            try {
-                val asset = AssetsAPI.getByName(accountName)
-                return@runBlocking asset?.type == AssetsType.CREDIT
-            } catch (e: Exception) {
-                // 查询失败时回退到名称判断
-                return@runBlocking false
-            }
-        }
-
-        false
-    }
-
     override fun features(): List<BookFeatures> {
         return if (WorkMode.isXposedOrLSPatch()) {
             listOf(
                 BookFeatures.MULTI_BOOK,
                 BookFeatures.FEE,
-                //  BookFeatures.TAG,
+                BookFeatures.TAG,
                 BookFeatures.DEBT,
                 BookFeatures.ASSET_MANAGE,
                 BookFeatures.MULTI_CURRENCY,
-                BookFeatures.REIMBURSEMENT
+                BookFeatures.REIMBURSEMENT,
+
             )
         } else {
             listOf(
@@ -169,12 +144,14 @@ class QianJiAdapter : IAppAdapter {
         // 6) 分类选择模式：0表示自动选择
         uriBuilder.append("&catechoose=0")
 
-        // 7) 账本（可选）- 排除默认账本名称
-        if (billInfoModel.bookName.isNotEmpty() &&
-            billInfoModel.bookName != "默认账本" &&
-            billInfoModel.bookName != "日常账本" &&
+        // 7) 账本（可选）- bookName 已在 BillService.categorize() 中解析为真实名称
+        if (
             PrefManager.featureMultiBook
+            && billInfoModel.bookName.isNotEmpty()
+            && billInfoModel.bookName != DefaultData.DEFAULT_BOOK_NAME
+            && bookSize() > 1
         ) {
+
             uriBuilder.append("&bookname=")
                 .append(Uri.encode(billInfoModel.bookName))
         }
@@ -200,7 +177,9 @@ class QianJiAdapter : IAppAdapter {
                 uriBuilder.append("&fee=").append(-billInfoModel.fee)
                 billInfoModel.money -= billInfoModel.fee
             } else {
+                //billInfoModel.money += billInfoModel.fee
                 uriBuilder.append("&discount=").append(billInfoModel.fee)
+                //uriBuilder.append("&coupon=").append(billInfoModel.fee)
             }
 
 
@@ -226,7 +205,16 @@ class QianJiAdapter : IAppAdapter {
             uriBuilder.append("&id=").append(billInfoModel.id)
         }
 
-        // TODO 标签
+        if (PrefManager.featureTag) {
+            uriBuilder.append("&tag=").append(Uri.encode(billInfoModel.tags))
+        }
+
+        if (PrefManager.billFlagNotCount || PrefManager.billFlagNotBudget) {
+            uriBuilder.append("&flag=").append(billInfoModel.flag)
+        }
+
+        // TODO 使用记账软件自带的记账面板
+
 
         if (!PrefManager.showSuccessPopup) {
             // 13) 统一不弹出成功提示
@@ -236,7 +224,7 @@ class QianJiAdapter : IAppAdapter {
 
         // 14) 发起隐式 Intent 调起钱迹
         val intent = Intent(Intent.ACTION_VIEW, uriBuilder.toString().toUri()).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
         Logger.i("目标应用uri：${uriBuilder}")
         SystemUtils.startActivityIfResolvable(intent, name) {
@@ -263,7 +251,7 @@ class QianJiAdapter : IAppAdapter {
             BillType.Income -> 1
             BillType.Transfer -> {
                 // 根据目标账户类型判断是否为信用卡还款
-                if (isCreditAccount(billInfoModel.accountNameTo)) {
+                if (AppAdapterManager.isCreditAccount(billInfoModel.accountNameTo)) {
                     3 // 信用卡还款
                 } else {
                     2 // 普通转账

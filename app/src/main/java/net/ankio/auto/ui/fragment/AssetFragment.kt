@@ -17,101 +17,257 @@ package net.ankio.auto.ui.fragment
 
 import android.os.Bundle
 import android.view.View
-import androidx.core.view.setPadding
-import androidx.fragment.app.Fragment
-import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.findNavController
-import androidx.viewpager2.adapter.FragmentStateAdapter
-import com.google.android.material.tabs.TabLayoutMediator
-import kotlinx.coroutines.launch
+import androidx.recyclerview.widget.ItemTouchHelper
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.SimpleItemAnimator
 import net.ankio.auto.R
-import net.ankio.auto.databinding.ComponentAssetBinding
 import net.ankio.auto.databinding.FragmentAssetBinding
 import net.ankio.auto.http.api.AssetsAPI
-import net.ankio.auto.storage.Logger
+import net.ankio.auto.ui.adapter.AssetSelectorAdapter
 import net.ankio.auto.ui.api.BaseFragment
 import net.ankio.auto.ui.api.BaseSheetDialog
-import net.ankio.auto.ui.api.bindAs
 import net.ankio.auto.ui.dialog.BottomSheetDialogBuilder
-import net.ankio.auto.ui.fragment.components.AssetComponent
-import net.ankio.auto.ui.utils.DisplayUtils.dp2px
 import net.ankio.auto.ui.utils.ListPopupUtilsGeneric
 import net.ankio.auto.ui.utils.ToastUtils
-import net.ankio.auto.ui.utils.adapterBottom
-import net.ankio.auto.utils.PrefManager
 import org.ezbook.server.constant.AssetsType
 import org.ezbook.server.db.model.AssetsModel
 
 /**
  * 资产管理Fragment
  *
- * 该Fragment负责显示和管理资产列表，提供以下功能：
- * - 使用Tab区分不同类型的资产
- * - 支持资产的增删改查
- * - 使用浮动按钮作为添加资产的按钮
+ * 显示所有资产的扁平列表，每个item显示：
+ * - 资产图标和名称
+ * - 类型标签（普通/信用/借款人/债权人）
+ * - 货币标签（CNY/USD等）
+ *
+ * 设计原则：
+ * 1. 扁平列表：无分组头，类型直接显示在item上
+ * 2. 简单排序：按类型分组，组内按sort排序
+ * 3. 无复杂性：无折叠、无状态管理
  */
 class AssetFragment : BaseFragment<FragmentAssetBinding>() {
 
-    /** Tab页面适配器 */
-    private lateinit var pagerAdapter: AssetPagerAdapter
+    /** 资产适配器 */
+    private lateinit var adapter: AssetSelectorAdapter
 
-    // TabLayoutMediator 引用，onDestroyView 时解除绑定
-    private var tabMediator: TabLayoutMediator? = null
+    /** 拖拽排序助手 */
+    private lateinit var itemTouchHelper: ItemTouchHelper
 
-    /** 资产类型列表，根据功能开关动态构建 */
-    private val assetTypes: List<AssetsType> by lazy {
-        buildList {
-            // 基础资产类型始终显示
-            add(AssetsType.NORMAL)      // 普通资产
-            add(AssetsType.CREDIT)      // 信用资产
-
-            // 只有开启债务功能时才显示借贷相关类型
-            if (PrefManager.featureDebt) {
-                add(AssetsType.BORROWER)    // 借款人
-                add(AssetsType.CREDITOR)    // 债权人
-            }
-        }
-    }
+    /** 类型筛选：null 表示全部，非空则只显示指定类型 */
+    private var selectedTypes: Set<AssetsType>? = null
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         setupViews()
-        initializeAssetTabs()
+        setupTypeFilter()
+        setupRecyclerView()
+        loadData()
     }
 
-    /**
-     * Fragment恢复时刷新数据
-     */
     override fun onResume() {
         super.onResume()
-        refreshCurrentPageData()
+        // 返回时刷新数据（编辑/删除后）
+        loadData()
     }
 
     /**
      * 设置UI组件
      */
     private fun setupViews() {
-        // 设置返回按钮监听器
+        // 返回按钮
         binding.topAppBar.setNavigationOnClickListener {
             findNavController().popBackStack()
         }
 
-        // 设置添加按钮
+        // 添加按钮
         binding.addButton.setOnClickListener {
             navigateToAssetEdit(0L)
+        }
+
+        // 下拉刷新
+        binding.statusPage.swipeRefreshLayout?.setOnRefreshListener {
+            loadData()
+            binding.statusPage.swipeRefreshLayout?.isRefreshing = false
         }
     }
 
     /**
-     * 刷新当前页面的资产数据
+     * 设置类型筛选
+     * 单行 ChipGroup，单选：全部/普通/信用/借出方/债权人
      */
-    private fun refreshCurrentPageData() {
-        if (::pagerAdapter.isInitialized) {
-            val currentItem = binding.viewPager.currentItem
-            val fragment = childFragmentManager.fragments.find {
-                it is AssetPageFragment && it.isVisible
-            } as? AssetPageFragment
-            fragment?.refreshData()
+    private fun setupTypeFilter() {
+        val chipToTypes = mapOf(
+            R.id.chip_all to null as Set<AssetsType>?,
+            R.id.chip_normal to setOf(AssetsType.NORMAL),
+            R.id.chip_credit to setOf(AssetsType.CREDIT),
+            R.id.chip_borrower to setOf(AssetsType.BORROWER),
+            R.id.chip_creditor to setOf(AssetsType.CREDITOR)
+        )
+        binding.typeFilterChipGroup.setOnCheckedStateChangeListener { _, checkedIds ->
+            val chipId = checkedIds.firstOrNull() ?: return@setOnCheckedStateChangeListener
+            selectedTypes = chipToTypes[chipId]
+            loadData()
+        }
+    }
+
+    /**
+     * 设置RecyclerView
+     */
+    private fun setupRecyclerView() {
+        val recyclerView = binding.statusPage.contentView!!
+        recyclerView.layoutManager = LinearLayoutManager(requireContext())
+
+        adapter = AssetSelectorAdapter()
+            .setTypeNameMapper(::getTypeName)
+            .setOnItemClickListener { asset, _ ->
+                navigateToAssetEdit(asset.id)
+            }
+            .setOnItemLongClickListener { asset, view ->
+                showAssetActionMenu(asset, view)
+            }
+            .setOnDeleteClickListener { asset ->
+                // 滑动删除触发
+                showDeleteConfirmDialog(asset)
+            }
+
+        recyclerView.adapter = adapter
+
+        // 添加拖拽排序和滑动删除
+        setupItemTouchHelper(recyclerView)
+    }
+
+    /**
+     * 设置拖拽排序和滑动删除
+     */
+    private fun setupItemTouchHelper(recyclerView: RecyclerView) {
+        val callback = object : ItemTouchHelper.SimpleCallback(
+            ItemTouchHelper.UP or ItemTouchHelper.DOWN,
+            ItemTouchHelper.LEFT  // 支持左滑删除
+        ) {
+            /**
+             * 拖拽移动
+             */
+            override fun onMove(
+                recyclerView: RecyclerView,
+                source: RecyclerView.ViewHolder,
+                target: RecyclerView.ViewHolder
+            ): Boolean {
+                val fromPos = source.bindingAdapterPosition
+                val toPos = target.bindingAdapterPosition
+
+                if (fromPos < 0 || toPos < 0) return false
+
+                val items = adapter.getItems()
+                if (fromPos >= items.size || toPos >= items.size) return false
+
+                // 防止跨类型拖拽：只能在同类型资产间移动
+                if (items[fromPos].type != items[toPos].type) {
+                    return false
+                }
+
+                // 交换位置
+                adapter.swapItems(fromPos, toPos)
+                return true
+            }
+
+            /**
+             * 拖拽状态改变
+             */
+            override fun onSelectedChanged(
+                viewHolder: RecyclerView.ViewHolder?,
+                actionState: Int
+            ) {
+                super.onSelectedChanged(viewHolder, actionState)
+                // 拖拽时提升视图
+                if (actionState == ItemTouchHelper.ACTION_STATE_DRAG) {
+                    viewHolder?.itemView?.alpha = 0.9f
+                    viewHolder?.itemView?.elevation = 8f
+                }
+            }
+
+            /**
+             * 拖拽结束：恢复视图并更新排序到数据库
+             */
+            override fun clearView(
+                recyclerView: RecyclerView,
+                viewHolder: RecyclerView.ViewHolder
+            ) {
+                super.clearView(recyclerView, viewHolder)
+                // 恢复视图状态
+                viewHolder.itemView.alpha = 1.0f
+                viewHolder.itemView.elevation = 0f
+                // 更新排序
+                updateAssetsSort()
+            }
+
+            /**
+             * 滑动删除
+             */
+            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
+                // 左滑删除
+                val position = viewHolder.bindingAdapterPosition
+                if (position != RecyclerView.NO_POSITION) {
+                    val item = adapter.getItems()[position]
+                    // 先恢复item位置，等用户确认后再真正删除
+                    adapter.notifyItemChanged(position)
+                    adapter.triggerDelete(item)
+                }
+            }
+
+            /**
+             * 启用长按拖拽
+             */
+            override fun isLongPressDragEnabled(): Boolean = true
+        }
+
+        itemTouchHelper = ItemTouchHelper(callback)
+        itemTouchHelper.attachToRecyclerView(recyclerView)
+    }
+
+    /**
+     * 加载资产数据
+     * 根据 selectedTypes 筛选：null 显示全部，非空则只显示指定类型
+     */
+    private fun loadData() {
+        binding.statusPage.showLoading()
+
+        launch {
+            try {
+                var assets = AssetsAPI.list()
+
+                // 按类型筛选
+                selectedTypes?.let { types ->
+                    assets = assets.filter { it.type in types }
+                }
+
+                if (assets.isEmpty()) {
+                    binding.statusPage.showEmpty()
+                } else {
+                    // 按类型排序，组内按sort排序
+                    val sorted = assets.sortedWith(
+                        compareBy<AssetsModel> { it.type.ordinal }
+                            .thenBy { it.sort }
+                    )
+                    adapter.replaceItems(sorted)
+                    binding.statusPage.showContent()
+                }
+            } catch (e: Exception) {
+                binding.statusPage.showError()
+            }
+        }
+    }
+
+    /**
+     * 获取资产类型的显示名称
+     */
+    private fun getTypeName(type: AssetsType): String {
+        return when (type) {
+            AssetsType.NORMAL -> getString(R.string.type_normal)
+            AssetsType.CREDIT -> getString(R.string.type_credit)
+            AssetsType.BORROWER -> getString(R.string.type_borrower)
+            AssetsType.CREDITOR -> getString(R.string.type_creditor)
         }
     }
 
@@ -122,179 +278,72 @@ class AssetFragment : BaseFragment<FragmentAssetBinding>() {
         val bundle = Bundle().apply {
             putLong("assetId", assetId)
         }
-        // 使用目的地 ID 导航，避免当前目的地为 NavGraph 时解析不到 action
         findNavController().navigate(R.id.assetEditFragment, bundle)
     }
 
     /**
-     * 初始化资产Tab页面
+     * 显示资产操作菜单（编辑/删除）
      */
-    private fun initializeAssetTabs() {
-        // 清理旧绑定，避免泄漏
-        tabMediator?.detach()
-        tabMediator = null
-        binding.viewPager.adapter = null
+    private fun showAssetActionMenu(asset: AssetsModel, anchorView: View) {
+        val actionMap = hashMapOf(
+            getString(R.string.edit) to "edit",
+            getString(R.string.delete) to "delete"
+        )
 
-        // 设置ViewPager适配器
-        pagerAdapter = AssetPagerAdapter(this, assetTypes)
-        binding.viewPager.adapter = pagerAdapter
-
-        // 连接TabLayout和ViewPager2
-        tabMediator = TabLayoutMediator(binding.tabLayout, binding.viewPager) { tab, position ->
-            // 根据实际的资产类型列表动态设置Tab标题
-            tab.text = when (assetTypes.getOrNull(position)) {
-                AssetsType.NORMAL -> getString(R.string.type_normal)
-                AssetsType.CREDIT -> getString(R.string.type_credit)
-                AssetsType.BORROWER -> getString(R.string.type_borrower)
-                AssetsType.CREDITOR -> getString(R.string.type_creditor)
-                else -> ""
+        ListPopupUtilsGeneric.create<String>(requireContext())
+            .setAnchor(anchorView)
+            .setList(actionMap)
+            .setSelectedValue("")
+            .setOnItemClick { _, _, value ->
+                when (value) {
+                    "edit" -> navigateToAssetEdit(asset.id)
+                    "delete" -> showDeleteConfirmDialog(asset)
+                }
             }
-        }.apply { attach() }
-    }
-
-    override fun onDestroyView() {
-        // 解除 TabLayoutMediator 绑定并清空适配器
-        try {
-            tabMediator?.detach()
-        } catch (_: Exception) {
-        }
-        tabMediator = null
-        try {
-            binding.viewPager.adapter = null
-        } catch (_: Exception) {
-        }
-        super.onDestroyView()
+            .toggle()
     }
 
     /**
-     * 资产Tab页面适配器
+     * 显示删除确认对话框
      */
-    private class AssetPagerAdapter(
-        private val parentFragment: Fragment,
-        private val assetTypes: List<AssetsType>
-    ) : FragmentStateAdapter(parentFragment) {
-
-        override fun getItemCount(): Int = assetTypes.size
-
-        override fun createFragment(position: Int): Fragment {
-            return AssetPageFragment.newInstance(
-                assetTypes[position],
-                parentFragment as AssetFragment
-            )
-        }
+    private fun showDeleteConfirmDialog(asset: AssetsModel) {
+        BaseSheetDialog.create<BottomSheetDialogBuilder>(requireContext())
+            .setTitle(getString(R.string.delete_asset))
+            .setMessage(getString(R.string.delete_asset_message, asset.name))
+            .setPositiveButton(getString(R.string.ok)) { _, _ ->
+                launch {
+                    AssetsAPI.delete(asset.id)
+                    ToastUtils.info(getString(R.string.delete_asset_success))
+                    // 刷新列表
+                    loadData()
+                }
+            }
+            .setNegativeButton(getString(R.string.close)) { _, _ ->
+                // 取消删除，item已经通过notifyItemChanged恢复
+            }
+            .show()
     }
 
     /**
-     * 资产页面Fragment - 显示具体的资产列表
+     * 更新资产排序
+     * 拖拽结束后，批量更新所有资产的sort字段
      */
-    class AssetPageFragment : BaseFragment<ComponentAssetBinding>() {
-
-        companion object {
-            private const val ARG_ASSET_TYPE = "asset_type"
-
-            fun newInstance(
-                assetType: AssetsType,
-                parentFragment: AssetFragment
-            ): AssetPageFragment {
-                return AssetPageFragment().apply {
-                    arguments = Bundle().apply {
-                        putString(ARG_ASSET_TYPE, assetType.name)
-                    }
-                    this.parentAssetFragment = parentFragment
+    private fun updateAssetsSort() {
+        launch {
+            try {
+                val items = adapter.getItems()
+                // 重新计算sort值（按当前列表顺序）
+                items.forEachIndexed { index, asset ->
+                    asset.sort = index
                 }
+                // 批量更新到数据库
+                items.forEach { asset ->
+                    AssetsAPI.save(asset)
+                }
+            } catch (e: Exception) {
+                // 更新失败，重新加载数据恢复原状
+                loadData()
             }
-        }
-
-        private var parentAssetFragment: AssetFragment? = null
-
-        // 使用可空引用并在 onDestroyView 置空，避免持有销毁视图
-        private var assetComponent: AssetComponent? = null
-        private lateinit var assetType: AssetsType
-
-        override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-            super.onViewCreated(view, savedInstanceState)
-            assetType = AssetsType.valueOf(arguments?.getString(ARG_ASSET_TYPE) ?: "NORMAL")
-            initAssetComponent()
-            binding.statusPage.adapterBottom(requireContext())
-        }
-
-        /**
-         * 初始化资产组件
-         */
-        private fun initAssetComponent() {
-
-            assetComponent = binding.bindAs<AssetComponent>()
-
-            // 设置资产选择回调
-            assetComponent?.setOnAssetSelectedListener { asset ->
-                asset.let {
-                    Logger.d("资产被选中: ${it.name}")
-                }
-            }
-
-            // 设置长按回调
-            assetComponent?.setOnAssetLongClickListener { asset, view ->
-                showAssetActionDialog(asset, view)
-            }
-
-            // 设置资产类型过滤器（这将触发数据加载）
-            assetComponent?.setAssetTypeFilter(assetType)
-        }
-
-        /**
-         * 刷新资产数据
-         */
-        fun refreshData() {
-            assetComponent?.refreshData()
-        }
-
-        override fun onDestroyView() {
-            // 释放引用，防止持有已销毁视图
-            assetComponent = null
-            parentAssetFragment = null
-            super.onDestroyView()
-        }
-
-        /**
-         * 显示资产操作选择对话框（编辑或删除）
-         */
-        private fun showAssetActionDialog(asset: AssetsModel, anchorView: View) {
-            val actionMap = hashMapOf(
-                getString(R.string.edit) to "edit",
-                getString(R.string.delete) to "delete"
-            )
-
-            ListPopupUtilsGeneric.create<String>(requireContext())
-                .setAnchor(anchorView)
-                .setList(actionMap)
-                .setSelectedValue("")
-                .setOnItemClick { _, _, value ->
-                    when (value) {
-                        "edit" -> parentAssetFragment?.navigateToAssetEdit(asset.id)
-                        "delete" -> showDeleteAssetDialog(asset)
-                    }
-                }
-                .toggle()
-        }
-
-        /**
-         * 显示删除资产确认对话框
-         */
-        private fun showDeleteAssetDialog(asset: AssetsModel) {
-            BaseSheetDialog.create<BottomSheetDialogBuilder>(requireContext())
-                .setTitle(getString(R.string.delete_asset))
-                .setMessage(getString(R.string.delete_asset_message, asset.name))
-                .setPositiveButton(getString(R.string.ok)) { _, _ ->
-                    launch {
-                        // 调用删除API
-                        AssetsAPI.delete(asset.id)
-                        ToastUtils.info(getString(R.string.delete_asset_success))
-                        // 刷新数据
-                        refreshData()
-                    }
-                }
-                .setNegativeButton(getString(R.string.close)) { _, _ -> }
-                .show()
         }
     }
 }

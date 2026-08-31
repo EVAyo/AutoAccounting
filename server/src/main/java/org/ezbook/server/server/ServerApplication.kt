@@ -28,15 +28,19 @@ import io.ktor.response.respond
 import io.ktor.routing.routing
 import org.ezbook.server.models.ResultModel
 import org.ezbook.server.tools.BillService
-import org.ezbook.server.tools.ServerLog
+import org.ezbook.server.log.ServerLog
 import org.ezbook.server.tools.SettingUtils
+import kotlin.coroutines.cancellation.CancellationException
 
 fun Application.module(context: Context) {
     install(StatusPages) {
         exception<Throwable> { cause ->
+            // CancellationException 是协程正常的取消信号（如客户端断开连接），
+            // 重新抛出让 Ktor 正常处理，不记录为错误
+            if (cause is CancellationException) throw cause
             call.respond(
                 HttpStatusCode.OK,
-                ResultModel.error(500, cause.message ?: "")
+                ResultModel.error(500, buildErrorMessage(cause))
             )
             ServerLog.e(cause.message ?: "", cause)
         }
@@ -120,3 +124,25 @@ fun Application.module(context: Context) {
     }
 }
 
+/**
+ * 组装全局异常的可读错误信息
+ * - 默认：包含异常类型 + 当前异常信息 + 根因信息
+ * - 调试模式：附加完整堆栈，便于定位
+ */
+private fun buildErrorMessage(cause: Throwable): String {
+    val root = generateSequence(cause) { it.cause }.last()
+    val currentMessage = cause.message ?: "unknown error"
+    val rootMessage = root.message ?: "unknown error"
+    val baseMessage = buildString {
+        append(cause::class.java.simpleName)
+        append(": ")
+        append(currentMessage)
+        if (root !== cause) {
+            append(" | root=")
+            append(root::class.java.simpleName)
+            append(": ")
+            append(rootMessage)
+        }
+    }
+    return baseMessage + "\n" + cause.stackTraceToString()
+}

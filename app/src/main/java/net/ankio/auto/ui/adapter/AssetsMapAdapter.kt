@@ -26,7 +26,8 @@ import org.ezbook.server.db.model.AssetsMapModel
 /**
  * 资产映射适配器
  *
- * 负责展示资产映射列表项，通过链式调用配置各种事件处理
+ * 负责展示资产映射列表项
+ * 支持：点击编辑、长按拖拽排序、左滑删除
  */
 class AssetsMapAdapter : BaseAdapter<AdapterMapBinding, AssetsMapModel>() {
 
@@ -65,15 +66,14 @@ class AssetsMapAdapter : BaseAdapter<AdapterMapBinding, AssetsMapModel>() {
                 onEditClick?.invoke(item, position)
             }
         }
+    }
 
-        // 长按删除事件
-        binding.item.setOnLongClickListener {
-            val item = holder.item
-            if (item != null) {
-                onDeleteClick?.invoke(item)
-            }
-            true
-        }
+    /**
+     * 触发删除事件（供外部调用，如滑动删除）
+     * @param item 要删除的项目
+     */
+    fun triggerDelete(item: AssetsMapModel) {
+        onDeleteClick?.invoke(item)
     }
 
     override fun onBindViewHolder(

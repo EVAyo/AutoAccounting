@@ -20,7 +20,9 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.core.net.toUri
-import de.robv.android.xposed.XposedBridge
+import com.google.gson.Gson
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import net.ankio.auto.BuildConfig
 import net.ankio.auto.http.api.BillAPI
 import net.ankio.auto.xposed.core.api.PartHooker
@@ -45,12 +47,16 @@ import net.ankio.auto.xposed.hooks.qianji.models.UserModel
 import net.ankio.auto.xposed.hooks.qianji.debt.IncomeLendingUtils
 import net.ankio.auto.xposed.hooks.qianji.debt.ExpendRepaymentUtils
 import net.ankio.auto.xposed.hooks.qianji.debt.IncomeRepaymentUtils
+import net.ankio.auto.xposed.hooks.qianji.impl.TagRefreshPresenterImpl
+import net.ankio.auto.xposed.hooks.qianji.models.CurrencyExtraModel
+import net.ankio.auto.xposed.hooks.qianji.sync.SyncClazz
 import net.ankio.auto.xposed.hooks.qianji.tools.QianJiBillType
 import net.ankio.auto.xposed.hooks.qianji.tools.QianJiUri
 import net.ankio.auto.xposed.hooks.qianji.utils.BroadcastUtils
 import net.ankio.auto.xposed.hooks.qianji.utils.TimeRecordUtils
 import org.ezbook.server.constant.BillAction
 import org.ezbook.server.db.model.BillInfoModel
+import org.ezbook.server.db.model.CurrencyModel
 import org.ezbook.server.tools.runCatchingExceptCancel
 
 
@@ -109,39 +115,125 @@ class AutoHooker : PartHooker() {
                 MessageUtils.toast("未登录的用户无法进行自动记账（钱迹限制）")
             }
         }
+
+    }
+
+
+    private fun addBilInfo(billModel: QjBillModel, activity: Activity, uri: Uri): QjBillModel {
+        val fee = uri.getQueryParameter("fee")?.toDoubleOrNull() ?: 0.0
+        //处理优惠
+        val discount = uri.getQueryParameter("discount")?.toDoubleOrNull() ?: 0.0
+
+
+
+        if (discount > 0) {
+            //只有支出或者还款的账户才需要记录优惠
+            val extraModel = billModel.getExtra()
+            extraModel.setTransfee(-discount)
+            billModel.setExtra(extraModel)
+        }
+
+        //处理标记位置
+        val flag = uri.getQueryParameter("flag")?.toIntOrNull() ?: 0
+        if (billModel.isAllIncome() || billModel.isAllSpend() || billModel.isTransfer()) {
+            billModel.setFlag(flag)
+        }
+
+
+        //处理标签
+        val tags = uri.getQueryParameter("tag")?.split(",") ?: listOf()
+        if (tags.isNotEmpty()) {
+
+            var tagList = runBlocking { TagRefreshPresenterImpl.getTagsByNames(tags) }
+
+            tagList = if (UserModel.isVip()) {
+                tagList.take(8)
+            } else {
+                tagList.take(1)
+            }
+
+            // 更新后tag为生效
+
+            billModel.setTagList(tagList)
+        }
+
+        // 多币种处理
+        val currency = uri.getQueryParameter("currency")
+        if (currency?.startsWith("{") == true) {
+            runCatching {
+                val currencyModel = Gson().fromJson(currency, CurrencyModel::class.java)
+                // 根据账单类型选择对应的币种构建方式
+                val currencyExtra = when {
+                    billModel.isAllIncome() || billModel.isAllSpend() ->
+                        CurrencyExtraModel.buildCurrencyIncomeSpend(
+                            currencyModel.code,         // 外币代码（如 "USD"）
+                            currencyModel.rate,         // 外币对本位币汇率
+                            currencyModel.baseCurrency, // 目标币种（同本位币）
+                            1.0,                        // 目标汇率（本位币为 1.0）
+                            currencyModel.baseCurrency, // 本位币（如 "CNY"）
+                            billModel.getMoney(),       // 外币金额
+                            if (fee == 0.0) discount else fee
+                        )
+
+                    billModel.isTransfer() || billModel.isCreditHuanKuan() ->
+                        CurrencyExtraModel.buildTransferCurrency(
+                            currencyModel.code,         // 转出账户币种
+                            currencyModel.rate,         // 外币对本位币汇率
+                            currencyModel.baseCurrency, // 转入账户币种（本位币）
+                            1.0,                        // 目标汇率（本位币为 1.0）
+                            currencyModel.baseCurrency, // 本位币
+                            billModel.getMoney(),       // 外币金额
+                            fee
+                        )
+
+                    else -> null
+                }
+                // 将币种扩展信息写入账单
+                currencyExtra?.let { extra ->
+                    val billExtra = billModel.getExtra()
+                    billExtra.setCurrencyExtra(extra)
+                    billModel.setExtra(billExtra)
+                }
+            }.onFailure { e ->
+                e(e)
+            }
+        }
+
+
+        billModel.setUpdateTimeInSec(System.currentTimeMillis() / 1000)
+        billModel.setStatus(QjBillModel.STATUS_NOT_SYNC)
+
+        val id = uri.getQueryParameter("id")?.toIntOrNull() ?: 0
+
+        val rawBillModel = DbHooker.link2Auto(billModel.getBillid(), id)
+
+        if (rawBillModel != null) {
+            billModel.setBillid(rawBillModel.getBillid())
+            billModel.set_id(billModel.get_id())
+
+        }
+
+
+
+        return billModel
+
+
     }
 
     private fun hookBroadcast(activity: Activity, uri: Uri) {
-        Hooker.onceBefore(
-            BroadcastUtils.clazz(),
-            "onAddBill",
-            QjBillModel.clazz(),
-            Boolean::class.javaPrimitiveType!!
-        ) {
-            val billModel = QjBillModel.fromObject(it.args[0])
-            //传入的是负值表示优惠
-            val discount = uri.getQueryParameter("discount")?.toDoubleOrNull()
-            if (discount != null && discount > 0 && (billModel.isSpend() || billModel.isTransfer())) {
-                //只有支出或者还款的账户才需要记录优惠
-                val extraModel = BillExtraModel.newInstance()
-                extraModel.setTransfee(-discount)
-                billModel.setExtra(extraModel)
+
+        Hooker.onceBefore(BillDbHelper.clazz(), "saveOrUpdateBill", QjBillModel.clazz()) {
+            val trace = Throwable().stackTraceToString()
+            if (trace.contains(AddBillIntentAct.CLAZZ)) {
+                val bill = QjBillModel.fromObject(it.args[0])
+                d("saveOrUpdateBill before, billId=${bill.getBillid()}")
+                val billModel = addBilInfo(bill, activity, uri)
+                d("saveOrUpdateBill after, billId=${billModel.getBillid()}")
                 it.args[0] = billModel.toObject()
-
+                return@onceBefore true
             }
-            //TODO 对于币种的处理
-            // 先获取本位币
-            // 根据本位币对目的币种的汇率计算本位币的实际支出金额
-            // 给Extra填充汇率等信息
 
-
-            BillDbHelper.newInstance().saveOrUpdateBill(billModel)
-            XposedBridge.log("保存的自动记账账单：${it.args[0]}, 当前的URi: ${uri}")
-
-
-
-
-            true
+            return@onceBefore false
         }
     }
 
@@ -174,6 +266,8 @@ class AutoHooker : PartHooker() {
                         AssetPreviewPresenterImpl.syncAssets()
                         val books = BookManagerImpl.syncBooks()
                         CateInitPresenterImpl.syncCategory(books)
+                        TagRefreshPresenterImpl.syncTag()
+
                         MessageUtils.toast("资产信息同步完成")
                     }
 
@@ -215,7 +309,7 @@ class AutoHooker : PartHooker() {
             param.args[1] = autoTaskLog.toObject()
             val value = autoTaskLog.getValue()
             val uri = value?.toUri()
-            manifest.i("hookTaskLog: $value")
+            i("task log uri=$value")
             val addBillIntentAct = AddBillIntentAct.fromObj(param.thisObject)
             if (uri == null) {
                 addBillIntentAct.finishAffinity()
@@ -238,7 +332,7 @@ class AutoHooker : PartHooker() {
                 QianJiBillType.Income.value,
                 QianJiBillType.ExpendReimbursement.value
                     -> {
-                    manifest.i("Qianji Error: $msg")
+                    i("task type=${uri.getQueryParameter("type")}, msg=$msg")
 
                 }
 
@@ -282,7 +376,7 @@ class AutoHooker : PartHooker() {
                             MessageUtils.toast("报销成功")
                             BillAPI.status(billInfo.id, true)
                         }.onFailure {
-                            manifest.e("报销失败 ${it.message}", it)
+                            e("reimbursement failed", it)
                             MessageUtils.toast("报销失败 ${it.message ?: ""}")
                         }
                         addBillIntentAct.finishAffinity()
@@ -299,7 +393,7 @@ class AutoHooker : PartHooker() {
                             MessageUtils.toast("退款成功")
                             BillAPI.status(billInfo.id, true)
                         }.onFailure {
-                            manifest.e("退款失败 ${it.message}", it)
+                            e("refund failed", it)
                             MessageUtils.toast("退款失败 ${it.message ?: ""}")
                         }
                         AddBillIntentAct.fromObj(param.thisObject).finishAffinity()
@@ -320,8 +414,8 @@ class AutoHooker : PartHooker() {
                 MessageUtils.toast("借出成功")
                 BillAPI.status(billModel.id, true)
             }.onFailure {
-                manifest.d("借出失败 ${it.message}")
-                manifest.e(it)
+                d("lending failed")
+                e(it)
                 MessageUtils.toast("借出失败 ${it.message ?: ""}")
             }
             act.finishAffinity()
@@ -337,8 +431,8 @@ class AutoHooker : PartHooker() {
                 MessageUtils.toast("收款成功")
                 BillAPI.status(billModel.id, true)
             }.onFailure {
-                manifest.e(it)
-                manifest.d("收款失败 ${it.message}")
+                e(it)
+                d("repayment failed")
                 MessageUtils.toast("收款失败 ${it.message ?: ""}")
             }
             act.finishAffinity()
@@ -354,8 +448,8 @@ class AutoHooker : PartHooker() {
                 MessageUtils.toast("还款成功")
                 BillAPI.status(billModel.id, true)
             }.onFailure {
-                manifest.e(it)
-                manifest.d("还款失败 ${it.message}")
+                e(it)
+                d("expend repayment failed")
                 MessageUtils.toast("还款失败 ${it.message ?: ""}")
             }
             act.finishAffinity()
@@ -378,8 +472,8 @@ class AutoHooker : PartHooker() {
                 MessageUtils.toast("借入成功")
                 BillAPI.status(billModel.id, true)
             }.onFailure {
-                manifest.e(it)
-                manifest.d("借入失败 ${it.message}")
+                e(it)
+                d("income lending failed")
                 MessageUtils.toast("借入失败 ${it.message ?: ""}")
             }
             act.finishAffinity()
@@ -401,7 +495,7 @@ class AutoHooker : PartHooker() {
             val prop = param.args[0] as String
             val timeout = param.args[1] as Long
             if (prop == "auto_task_last_time") {
-                manifest.d("hookTimeout: $prop $timeout")
+                d("timeout bypass, prop=$prop")
                 param.result = true
             }
         }

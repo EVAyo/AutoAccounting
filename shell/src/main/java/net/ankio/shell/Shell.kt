@@ -82,15 +82,18 @@ class Shell(packageName: String) : Closeable {
      * 探测 root 能力是否可用。
      * @return true 表示可使用 root 执行命令。
      */
-    private fun rootPermission(): Boolean = rootExecutor.openShell()
+    fun rootPermission(): Boolean = rootExecutor.openShell()
 
     /**
      * 探测 Shizuku 能力是否可用（仅检查支持与未被拒绝，不主动拉起授权）。
      * @return true 表示可使用 Shizuku 执行命令。
      */
-    private fun shizukuPermission(): Boolean =
+    fun shizukuPermission(): Boolean =
         shizukuExecutor.isSupported && !shizukuExecutor.isPermissionDenied
 
+    fun requestShizukuPermission() {
+        shizukuExecutor.requestPermission()
+    }
     fun requestPermission() {
         if (!checkPermission()) {
             shizukuExecutor.requestPermission()
@@ -131,8 +134,18 @@ class Shell(packageName: String) : Closeable {
         } else if (shizukuPermission()) {
             return shizukuExecCommand(command)
         }
-        error("no permission")
+        error("no any shell permission")
     }
 
+
+    suspend fun runAsRoot(command: String): String {
+        if (rootPermission()) return rootExecCommand(command)
+        error("no root permission")
+    }
+
+    suspend fun runAsShizuku(command: String): String {
+        if (shizukuPermission()) return shizukuExecCommand(command)
+        error("no shizuku permission")
+    }
 
 }

@@ -20,7 +20,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import net.ankio.auto.BuildConfig
-import net.ankio.auto.xposed.core.logger.Logger
+import net.ankio.auto.xposed.core.logger.XposedLogger
 import net.ankio.auto.xposed.core.utils.AppRuntime
 import org.ezbook.server.Server
 import android.os.Process
@@ -38,13 +38,17 @@ object AppInstaller {
                             when (it.action) {
                                 Intent.ACTION_PACKAGE_ADDED,
                                 Intent.ACTION_PACKAGE_REPLACED -> {
+                                    XposedLogger.d("AppInstaller: detected $packageName ${it.action}, stopping server and restarting")
                                     runCatching {
                                         server.stopServer()
                                     }
                                     runCatching {
                                         AppRuntime.restart()
+                                    }.onSuccess {
+                                        XposedLogger.d("AppInstaller: restart triggered")
                                     }.onFailure { e ->
-                                        Logger.e("AppInstaller", e)
+                                        XposedLogger.e("AppInstaller", e)
+                                        XposedLogger.d("AppInstaller: restart failed, fallback to killProcess")
                                         Process.killProcess(Process.myPid())
                                     }
                                 }
@@ -63,7 +67,7 @@ object AppInstaller {
 
             context.registerReceiver(receiver, filter)
         } catch (e: Exception) {
-            Logger.e("AppInstaller", e)
+            XposedLogger.e("AppInstaller", e)
         }
     }
 }

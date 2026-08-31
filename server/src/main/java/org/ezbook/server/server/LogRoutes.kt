@@ -89,8 +89,9 @@ fun Route.logRoutes() {
          * @return ResultModel 包含新创建的日志ID列表
          */
         post("/addBatch") {
-            val logs = call.receive<List<LogModel>>()
-            val ids = Db.get().logDao().insert(logs)
+            // 使用 List 类型，Ktor 序列化对其支持更稳定
+            val logs = call.receive<Array<LogModel>>()
+            val ids = Db.get().logDao().insert(logs.toList())
             call.respond(ResultModel.ok(ids))
         }
 

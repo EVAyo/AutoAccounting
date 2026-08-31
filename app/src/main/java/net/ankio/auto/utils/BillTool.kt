@@ -107,23 +107,49 @@ object BillTool {
     }
 
 
-    fun setTextViewPrice(price: Double, type: BillType, view: MaterialTextView) {
+    fun setTextViewPrice(
+        price: Double,
+        type: BillType,
+        view: MaterialTextView,
+        currencyUnit: String? = null
+    ) {
         val t = getType(type)
         val color = ContextCompat.getColor(view.context, getColor(t))
         view.setTextColor(color)
-        when (t) {
+        // 有货币单位则追加到金额后面，如 "- 100.0 USD"
+        val suffix = if (currencyUnit.isNullOrEmpty()) "" else " $currencyUnit"
+        val sign = when (t) {
             BillType.Expend, BillType.ExpendReimbursement, BillType.ExpendLending, BillType.ExpendRepayment -> {
-                view.text = "- $price"
+                "- "
             }
 
             BillType.Income, BillType.IncomeLending, BillType.IncomeRepayment, BillType.IncomeReimbursement -> {
-                view.text = "+ $price"
+                "+ "
             }
 
-            else -> {
-                view.text = "$price"
-            }
+            else -> ""
         }
+        view.text =
+            view.context.getString(R.string.bill_amount_format, sign, price.toString(), suffix)
+    }
+
+    /**
+     * 获取多币种转换提示文本
+     *
+     * 当启用多币种且账单币种与本位币不同时，返回 "≈ 72.30 CNY" 格式的文本；
+     * 否则返回 null。
+     *
+     * @param bill 账单信息
+     * @return 转换文本或 null
+     */
+    fun getConversionText(bill: BillInfoModel): String? {
+        if (!PrefManager.featureMultiCurrency) return null
+        val model = bill.currencyModel()
+        val baseCurrency = PrefManager.baseCurrency
+        if (model.code == baseCurrency || model.code.isEmpty()) return null
+        if (model.rate <= 0) return null
+        val converted = bill.money * model.rate
+        return "≈ ${formatAmount(converted)} $baseCurrency"
     }
 
     fun getCateName(category1: String, category2: String? = null): String {
@@ -160,7 +186,9 @@ object BillTool {
                 }
             }
 
-            ToastUtils.info(autoApp.getString(R.string.sync_completed, syncedCount))
+            ToastUtils.info(
+                autoApp.resources.getQuantityString(R.plurals.sync_completed, syncedCount, syncedCount)
+            )
 
 
         }
@@ -181,9 +209,25 @@ object BillTool {
         App.launchIO {
             try {
                 BillAPI.put(bill)
-                // 若未开启手动同步，则保存后立即同步；否则跳过
+                // 若未开启手动同步，则根据延迟同步阈值决定同步策略
                 if (!PrefManager.manualSync && !bill.isChild()) {
-                    syncBill(bill)
+                    val threshold = PrefManager.delayedSyncThreshold
+                    if (threshold == 0) {
+                        // 阈值为0表示实时同步，立即同步当前账单
+                        syncBill(bill)
+                    } else {
+                        // 阈值大于0，检查未同步账单数量
+                        val unsyncedBills = BillAPI.sync()
+                        val unsyncedCount = unsyncedBills.size
+                        Logger.d("未同步账单数量: $unsyncedCount, 阈值: $threshold")
+
+                        // 如果未同步账单数量达到阈值，触发批量同步
+                        if (unsyncedCount >= threshold) {
+                            Logger.d("未同步账单达到阈值，触发批量同步")
+                            syncBills()
+                        }
+                        // 否则延迟同步，不立即同步
+                    }
                 }
                 Logger.d("账单保存成功: ${bill.id}")
 

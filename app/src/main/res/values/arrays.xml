@@ -122,6 +122,35 @@
         <item>AUTO_ACCOUNT</item>
     </string-array>
 
+    <!-- Float badge position options -->
+    <string-array name="float_position_texts" translatable="false">
+        <item>@string/float_position_left</item>
+        <item>@string/float_position_right</item>
+        <item>@string/float_position_top</item>
+    </string-array>
+
+    <string-array name="float_position_values" translatable="false">
+        <item>left</item>
+        <item>right</item>
+        <item>top</item>
+    </string-array>
+
+    <!-- Toast position options -->
+    <string-array name="toast_position_texts" translatable="false">
+        <item>@string/toast_position_top</item>
+        <item>@string/toast_position_center</item>
+        <item>@string/toast_position_bottom</item>
+    </string-array>
+
+    <string-array name="toast_position_values" translatable="false">
+        <item>top</item>
+        <item>center</item>
+        <item>bottom</item>
+    </string-array>
+
+    <!-- OCR auth mode options -->
+
+
     <!-- Update channel options -->
     <string-array name="update_channel_texts" translatable="false">
         <item>@string/version_stable</item>

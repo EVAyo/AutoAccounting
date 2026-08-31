@@ -15,8 +15,10 @@
 
 package net.ankio.auto.ui.utils
 
+import android.content.Context
 import android.graphics.drawable.Drawable
 import android.widget.ImageView
+import androidx.core.content.ContextCompat
 import com.bumptech.glide.Glide
 import net.ankio.auto.ui.theme.DynamicColors as ThemeColor
 import net.ankio.auto.R
@@ -47,6 +49,7 @@ import org.ezbook.server.db.model.CategoryModel
  */
 fun Int.toThemeColor(): Int = ThemeColor.resolve(this)
 
+fun Int.resToColor(): Int = ContextCompat.getColor(autoApp, this)
 /**
  * 将资源ID转换为Drawable对象
  * @return Drawable对象，可能为null
@@ -84,7 +87,7 @@ fun ImageView.load(
     defaultResId: Int? = null,
 ) {
 
-    val glide = Glide.with(this)
+    var glide = Glide.with(this)
         .load(
             when {
                 src.isNullOrBlank() -> defaultResId          // 空串直接用占位图
@@ -93,7 +96,7 @@ fun ImageView.load(
         )
         .error(defaultResId)
     if (defaultResId != null) {
-        glide.fallback(defaultResId)
+        glide = glide.fallback(defaultResId)
     }
     glide.into(this)
 }

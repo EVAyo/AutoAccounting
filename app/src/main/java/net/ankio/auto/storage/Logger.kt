@@ -6,19 +6,18 @@ import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.actor
 import net.ankio.auto.BuildConfig
-import net.ankio.auto.autoApp
 import net.ankio.auto.http.LocalNetwork
 import net.ankio.auto.http.api.LogAPI
 import net.ankio.auto.utils.DateUtils
+import net.ankio.auto.utils.PrefManager
 import org.ezbook.server.constant.LogLevel
 import org.ezbook.server.db.model.LogModel
-import org.ezbook.server.tools.BaseLogger
+import org.ezbook.server.log.BaseLogger
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.*
-import java.util.concurrent.Executors
 
 /**
  * 日志工具类，支持发送到服务端和按需导出到本地文件。
@@ -67,9 +66,7 @@ object Logger : BaseLogger() {
             try {
                 LogAPI.add(log)
             } catch (e: Exception) {
-                if (BuildConfig.DEBUG) {
-                    Log.e("Logger", "Send log to server error", e)
-                }
+                Log.e("Logger", "Send log to server error", e)
             }
         }
     }
@@ -186,4 +183,6 @@ object Logger : BaseLogger() {
 
         file
     }
+
+    override fun isDebugMode(): Boolean = PrefManager.debugMode
 }

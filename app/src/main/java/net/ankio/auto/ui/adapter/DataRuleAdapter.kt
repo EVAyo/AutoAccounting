@@ -19,11 +19,11 @@ import android.os.Bundle
 import android.view.View
 import androidx.fragment.app.Fragment
 import androidx.navigation.findNavController
+import com.google.android.material.color.MaterialColors
 import com.google.gson.Gson
 import net.ankio.auto.R
 import net.ankio.auto.databinding.AdapterDataRuleBinding
 import net.ankio.auto.http.api.RuleManageAPI
-import net.ankio.auto.storage.Logger
 import net.ankio.auto.ui.api.BaseAdapter
 import net.ankio.auto.ui.api.BaseSheetDialog
 import net.ankio.auto.ui.api.BaseViewHolder
@@ -41,16 +41,14 @@ class DataRuleAdapter(
     override fun onInitViewHolder(holder: BaseViewHolder<AdapterDataRuleBinding, RuleModel>) {
         val binding = holder.binding
 
-        // 编辑规则按钮 - 跳转到规则编辑页面
-        binding.editRule.setOnClickListener {
-            val item = holder.item!!
-            navigateToRuleEdit(it, item)
+        // 编辑按钮
+        binding.editButton.setOnClickListener {
+            navigateToRuleEdit(it, holder.item!!)
         }
 
-        // 删除规则按钮 - 显示确认对话框
-        binding.deleteData.setOnClickListener {
-            val item = holder.item!!
-            showDeleteConfirmDialog(it, item)
+        // 删除按钮
+        binding.deleteButton.setOnClickListener {
+            showDeleteConfirmDialog(it, holder.item!!)
         }
     }
 
@@ -63,7 +61,7 @@ class DataRuleAdapter(
             putString("rule", Gson().toJson(rule))
         }
         // 使用目的地 ID 导航，避免当前目的地为 NavGraph 时解析不到 action
-        view.findNavController().navigate(R.id.ruleEditFragment, bundle)
+        view.findNavController().navigate(R.id.RuleEditV3Fragment, bundle)
     }
 
     /**
@@ -105,32 +103,18 @@ class DataRuleAdapter(
         // 设置规则名称
         binding.ruleName.text = data.name
 
-        // 根据规则类型设置图标
-        binding.icon.visibility = View.VISIBLE
-        if (isSystemRule) {
-            // 系统规则使用云端图标
-            binding.icon.setImageResource(R.drawable.ic_cloud)
-            binding.icon.contentDescription = "云端规则"
-        } else {
-            // 用户规则使用本地图标（如果没有合适的图标，先用一个通用图标）
-            binding.icon.setImageResource(R.drawable.setting2_icon_from_local)
-            binding.icon.contentDescription = "本地规则"
-        }
+        // 设置规则类型标签 - 简单的TextView，清晰地告诉用户这是什么类型的规则
+        binding.ruleType.setText(if (isSystemRule) R.string.rule_type_cloud else R.string.rule_type_local)
 
-        // 操作按钮可见性：系统规则不允许编辑和删除
-        binding.editRule.visibility = if (isSystemRule) View.GONE else View.VISIBLE
-        binding.deleteData.visibility = if (isSystemRule) View.GONE else View.VISIBLE
+        // 设置数据类型标签 - 区分 APP/通知/OCR
+        setDataTypeTag(binding, data.type)
 
-        // 临时移除监听器，设置状态后再恢复
-        // 这样避免在数据绑定时触发监听器回调
-        binding.enable.setOnCheckedChangeListener(null)
-        binding.autoRecord.setOnCheckedChangeListener(null)
+        // 设置规则描述 - 优先使用数据库中的description字段，否则智能生成
+        binding.ruleDescription.text = generateRuleDescription(data)
 
-        // 设置开关状态（此时不会触发监听器）
+        // 设置启用开关
+        binding.enable.setOnCheckedChangeListener(null) // 先移除监听器避免触发
         binding.enable.isChecked = data.enabled
-        binding.autoRecord.isChecked = data.autoRecord
-
-        // 恢复监听器 - 重新设置原来的监听器逻辑
         binding.enable.setOnCheckedChangeListener { _, isChecked ->
             val item = holder.item!!
             item.enabled = isChecked
@@ -142,6 +126,9 @@ class DataRuleAdapter(
             }
         }
 
+        // 设置自动记账Chip - 使用更清晰的文字
+        binding.autoRecord.setOnCheckedChangeListener(null)
+        binding.autoRecord.isChecked = data.autoRecord
         binding.autoRecord.setOnCheckedChangeListener { _, isChecked ->
             val item = holder.item!!
             item.autoRecord = isChecked
@@ -152,6 +139,9 @@ class DataRuleAdapter(
                 ToastUtils.info(statusText)
             }
         }
+
+        // 设置操作按钮 - 系统规则不提供操作，用户规则可编辑/删除
+        binding.actionButtons.visibility = if (isSystemRule) View.GONE else View.VISIBLE
     }
 
     override fun areItemsSame(oldItem: RuleModel, newItem: RuleModel): Boolean {
@@ -162,5 +152,76 @@ class DataRuleAdapter(
         return oldItem == newItem
     }
 
+    /**
+     * 设置数据类型标签
+     * 根据规则类型设置不同的文本和颜色，提升视觉识别度
+     *
+     * 数据结构驱动：rule.type → 标签文本 + Material You 主题色
+     * 消除特殊情况：使用统一的颜色解析方法
+     *
+     * @param binding ViewBinding
+     * @param type 数据类型（app/notice/ocr）
+     */
+    private fun setDataTypeTag(binding: AdapterDataRuleBinding, type: String) {
+
+        when (type.lowercase()) {
+            "data" -> {
+                binding.dataType.text = fragment.getString(R.string.data_type_app)
+            }
+
+            "notice" -> {
+                binding.dataType.text = fragment.getString(R.string.data_type_notice)
+            }
+
+            "ocr" -> {
+                binding.dataType.text = fragment.getString(R.string.data_type_ocr)
+            }
+
+            else -> {
+                // 未知类型，使用默认样式
+                binding.dataType.text = ""
+            }
+        }
+    }
+
+    /**
+     * 生成规则描述文本
+     * 根据规则类型和应用包名智能生成带有使用提示的描述
+     *
+     * 数据结构驱动：无论是系统规则还是用户规则，都使用相同的生成逻辑
+     * 消除特殊情况：本地规则和云规则享受相同的描述生成能力
+     *
+     * @param rule 规则模型
+     * @return 描述文本
+     */
+    private fun generateRuleDescription(rule: RuleModel): String {
+        val ruleType = rule.type.lowercase()
+        val appPackage = rule.app
+
+
+        val description = when {
+            // 微信相关规则 - 提示关注公众号
+            appPackage.contains("com.tencent.mm") -> {
+                fragment.getString(R.string.rule_desc_wechat_notice, rule.name)
+            }
+
+            // 支付宝规则 - 提示保持后台运行
+            appPackage.contains("com.eg.android.AlipayGphone") -> {
+                fragment.getString(R.string.rule_desc_alipay_app, rule.name)
+            }
+
+            appPackage.contains("com.android.phone") -> {
+                fragment.getString(R.string.rule_desc_sms_hint, rule.name)
+            }
+            // 其他通知类规则 - 提示授权通知权限
+            ruleType == "notice" -> {
+                fragment.getString(R.string.rule_desc_other_notice, rule.name)
+            }
+            // 默认描述
+            else -> ""
+        }
+
+        return description
+    }
 
 }

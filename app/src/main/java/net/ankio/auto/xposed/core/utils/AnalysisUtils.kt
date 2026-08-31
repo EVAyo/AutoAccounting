@@ -16,7 +16,7 @@
 package net.ankio.auto.xposed.core.utils
 
 import net.ankio.auto.http.api.JsAPI
-import net.ankio.auto.xposed.core.logger.Logger
+import net.ankio.auto.xposed.core.logger.XposedLogger
 import org.ezbook.server.constant.DataType
 import org.ezbook.server.constant.DefaultData
 import org.ezbook.server.constant.Setting
@@ -33,22 +33,33 @@ object AnalysisUtils {
 
     fun analysisData(manifestAppPackage: String, type: DataType, data: String) {
         CoroutineUtils.withIO {
-
             val hash = MD5HashTable.md5(data)
             if (mD5HashTable.contains(hash)) {
+                XposedLogger.d("AnalysisUtils: duplicate skip, pkg=$manifestAppPackage, type=$type")
                 return@withIO
             }
-
             mD5HashTable.put(data)
 
-            val filter =
-                DataUtils.configString(Setting.DATA_FILTER, DefaultData.DATA_FILTER).split(",")
-            if (filter.all { !data.contains(it) }) {
+            val whitelist = DataUtils.configString(Setting.DATA_FILTER, DefaultData.DATA_FILTER)
+                .split(",").filter { it.isNotEmpty() }
+            if (whitelist.all { !data.contains(it) }) {
+                XposedLogger.d("AnalysisUtils: whitelist filter, pkg=$manifestAppPackage, type=$type, data=${data}")
                 return@withIO
             }
 
+            val blacklist = DataUtils.configString(
+                Setting.DATA_FILTER_BLACKLIST,
+                DefaultData.DATA_FILTER_BLACKLIST
+            )
+                .split(",").filter { it.isNotEmpty() }
+            if (blacklist.any { data.contains(it) }) {
+                XposedLogger.d("AnalysisUtils: blacklist filter, pkg=$manifestAppPackage, type=$type, data=${data}")
+                return@withIO
+            }
+
+            XposedLogger.d("AnalysisUtils: submit, pkg=$manifestAppPackage, type=$type, data=${data}")
             val result = JsAPI.analysis(type, data, manifestAppPackage)
-            Logger.i("$manifestAppPackage -> 分析结果: $result")
+            XposedLogger.i("AnalysisUtils: result pkg=$manifestAppPackage, type=$type, ok=${result.data != null}, msg=${result.msg} , result=${result.data}")
         }
     }
 }

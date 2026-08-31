@@ -63,14 +63,20 @@
                 app:textColor="?attr/colorOnSurface"
                 tools:text="微信零钱" />
 
+            <!-- 转账方向箭头：点击可交换来源/目标账户 -->
             <TextView
+                android:id="@+id/transfer_swap"
                 android:layout_width="@dimen/padding"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="@dimen/one_padding"
                 android:layout_marginEnd="@dimen/one_padding"
                 android:layout_weight="0"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:focusable="true"
+                android:contentDescription="@string/switch_transfer_direction"
                 android:gravity="center"
-                android:text="➜" />
+                android:text="@string/transfer_direction_arrow" />
 
             <net.ankio.auto.ui.components.IconView
                 android:id="@+id/transfer_to"
@@ -103,13 +109,18 @@
                 tools:text="微信零钱" />
 
             <TextView
+                android:id="@+id/debt_swap"
                 android:layout_width="@dimen/padding"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="@dimen/one_padding"
                 android:layout_marginEnd="@dimen/one_padding"
                 android:layout_weight="0"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:focusable="true"
+                android:contentDescription="@string/switch_transfer_direction"
                 android:gravity="center"
-                android:text="➜" />
+                android:text="@string/transfer_direction_arrow" />
 
             <com.google.android.material.textfield.TextInputLayout
                 android:id="@+id/debt_person_input_layout"
@@ -156,13 +167,18 @@
         </com.google.android.material.textfield.TextInputLayout>
 
             <TextView
+                android:id="@+id/debt_swap2"
                 android:layout_width="@dimen/padding"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="@dimen/one_padding"
                 android:layout_marginEnd="@dimen/one_padding"
                 android:layout_weight="0"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:focusable="true"
+                android:contentDescription="@string/switch_transfer_direction"
                 android:gravity="center"
-                android:text="➜" />
+                android:text="@string/transfer_direction_arrow" />
 
         <net.ankio.auto.ui.components.IconView
             android:id="@+id/debt_account2"

@@ -20,7 +20,6 @@ package net.ankio.auto.xposed.hooks.qianji.impl
  * 该类负责获取最近10天的账单列表并同步到自动记账
  */
 import com.google.gson.Gson
-import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -30,26 +29,19 @@ import net.ankio.auto.xposed.core.utils.AppRuntime
 import org.ezbook.server.tools.MD5HashTable
 import net.ankio.auto.xposed.core.utils.MessageUtils
 import net.ankio.auto.xposed.hooks.qianji.impl.BxPresenterImpl.convert2Bill
-import net.ankio.auto.xposed.hooks.qianji.filter.AssetsFilter
 import net.ankio.auto.xposed.hooks.qianji.filter.BillFlagFilter
 import net.ankio.auto.xposed.hooks.qianji.filter.BookFilter
 import net.ankio.auto.xposed.hooks.qianji.filter.DataFilter
-import net.ankio.auto.xposed.hooks.qianji.filter.ImageFilter
-import net.ankio.auto.xposed.hooks.qianji.filter.MoneyFilter
-import net.ankio.auto.xposed.hooks.qianji.filter.PlatformFilter
 import net.ankio.auto.xposed.hooks.qianji.filter.SortFilter
-import net.ankio.auto.xposed.hooks.qianji.filter.TagsFilter
 import net.ankio.auto.xposed.hooks.qianji.filter.TypesFilter
 import org.ezbook.server.constant.Setting
-import org.ezbook.server.db.model.BookBillModel
-import org.ezbook.server.db.model.SettingModel
 import java.lang.reflect.Proxy
 import java.util.Calendar
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import net.ankio.auto.http.api.BookBillAPI
 import net.ankio.auto.http.api.SettingAPI
-import net.ankio.auto.xposed.core.logger.Logger
+import net.ankio.auto.xposed.core.logger.XposedLogger
 
 object SearchPresenterImpl : HookerClazz() {
     private const val CLAZZ = "com.mutangtech.qianji.bill.search.SearchPresenterImpl"
@@ -159,6 +151,9 @@ object SearchPresenterImpl : HookerClazz() {
 
                 // 13. TagsFilter（可选）
                 if (refreshMethod.parameterTypes.size > 13) add(null)
+
+                // 14. CategoriesFilter（可选）
+                if (refreshMethod.parameterTypes.size > 14) add(null)
             }
 
             // 触发搜索
@@ -182,19 +177,14 @@ object SearchPresenterImpl : HookerClazz() {
                 runCatching {
                     getLast10DayLists(bookName)
                 }.onFailure {
-                    AppRuntime.manifest.e(it)
+                    XposedLogger.e(" get bills failed", it)
                 }.getOrDefault(emptyList<Any>())
             }
 
         val bills = convert2Bill(bxList, Setting.HASH_BILL)
         val sync = Gson().toJson(bills)
         val md5 = MD5HashTable.md5(sync)
-        val server = SettingAPI.get(Setting.HASH_BILL, "")
-        if (server == md5 && !AppRuntime.debug) {
-            AppRuntime.manifest.i("No need to sync bill Data, server md5:${server} local md5:${md5}")
-            return@withContext
-        }
-        AppRuntime.manifest.d("Sync bills:$sync")
+        XposedLogger.d(" sync bills, count=${bills.size}")
         BookBillAPI.put(bills, md5, Setting.HASH_BILL)
         withContext(Dispatchers.Main) {
             MessageUtils.toast("已同步支出账单到自动记账")

@@ -3,6 +3,7 @@ package net.ankio.auto.service
 import android.app.Activity
 import android.app.ActivityManager
 import android.app.Notification
+import android.app.PendingIntent
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
@@ -11,8 +12,10 @@ import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import net.ankio.auto.R
 import net.ankio.auto.constant.WorkMode
+import org.ezbook.server.intent.IntentType
 import net.ankio.auto.service.api.ICoreService
 import net.ankio.auto.storage.Logger
+import net.ankio.auto.ui.activity.MainActivity
 import net.ankio.auto.utils.PrefManager
 
 /**
@@ -42,7 +45,7 @@ class CoreService : LifecycleService() {
     override fun onCreate() {
         super.onCreate()
         startForegroundNotification()
-        Logger.i("服务创建，工作模式 = ${PrefManager.workMode}")
+        Logger.i("CoreService created, workMode=${PrefManager.workMode}")
         // 根据工作模式初始化服务列表
         initializeServices()
         // 初始化所有子服务
@@ -51,33 +54,41 @@ class CoreService : LifecycleService() {
 
     private fun startForegroundNotification() {
         createNotificationChannel()
-        // Android 14+ 要求前台服务在启动后尽快调用带类型的 startForeground
-        // 这里根据清单声明的类型 dataSync | mediaProjection 传入匹配的类型掩码，避免系统认为类型不明确而超时
         val notification = buildNotification()
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            val fgsType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            startForeground(notificationId, notification, fgsType)
-        } else {
-            startForeground(notificationId, notification)
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // Android 14+ 要求前台服务指定类型掩码，与清单中 foregroundServiceType="specialUse" 匹配
+                startForeground(
+                    notificationId,
+                    notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else {
+                startForeground(notificationId, notification)
+            }
+        } catch (e: SecurityException) {
+            Logger.e("Foreground service (specialUse) start failed: ${e.message}", e)
         }
     }
 
     /**
-     * 根据工作模式初始化服务列表
-     * Xposed模式下只启用悬浮窗服务
-     * 其他模式下启用所有服务：服务器服务、OCR服务和悬浮窗服务
+     * 根据工作模式初始化服务列表。
+     * Xposed 模式：OCR、双击背部触发、悬浮窗（无后台 HTTP）。
+     * 其他模式：后台 HTTP、OCR、双击背部触发、悬浮窗。
      */
     private fun initializeServices() {
         services = if (WorkMode.isXposed()) {
             listOf(
                 OcrService(),
-                OverlayService()
+                BackTapOcrTriggerService(),
+                OverlayService(),
             )
         } else {
             listOf(
-                BackgroundHttpService(),  // 自动记账的服务模块
-                OcrService(),     // OCR服务
-                OverlayService() // 悬浮窗服务
+                BackgroundHttpService(),
+                OcrService(),
+                BackTapOcrTriggerService(),
+                OverlayService(),
             )
         }
     }
@@ -95,10 +106,11 @@ class CoreService : LifecycleService() {
                 service.onCreate(this)
                 successCount++
             } catch (e: Exception) {
-                Logger.e("初始化服务 ${service.javaClass.simpleName} 失败: ${e.message}", e)
+                Logger.e("Service init failed: ${service.javaClass.simpleName}, ${e.message}", e)
                 failureCount++
             }
         }
+        Logger.d("Child services initialized: success=$successCount, failure=$failureCount")
     }
 
     /**
@@ -130,13 +142,27 @@ class CoreService : LifecycleService() {
 
     /**
      * 构建前台服务通知
-     * 创建一个低优先级、静默的通知
-     * @return 配置好的通知对象
+     * 创建一个低优先级、静默的通知，点击触发手动 OCR（通知不清除）
      */
     private fun buildNotification(): Notification {
+        val appIntent = Intent(this, MainActivity::class.java)
+        val appPendingIntent = PendingIntent.getActivity(
+            this, 0, appIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val ocrIntent = Intent(this, CoreService::class.java).apply {
+            putExtra("intentType", IntentType.OCR.name)
+            putExtra("manual", true)
+        }
+        val ocrPendingIntent = PendingIntent.getService(
+            this, 1, ocrIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, channelId)
             .setSmallIcon(R.drawable.icon_auto)
             .setContentTitle(getString(R.string.service_notification_title))
+            .setContentIntent(appPendingIntent)
+            .addAction(R.drawable.ic_ocr, getString(R.string.ocr_tile_title), ocrPendingIntent)
             .setOngoing(true)
             .setShowWhen(false)
             .setSilent(true)
@@ -162,7 +188,7 @@ class CoreService : LifecycleService() {
                 service.onStartCommand(intent, flags, startId)
             } catch (e: Exception) {
                 Logger.e(
-                    "服务 ${service.javaClass.simpleName} 处理启动命令失败: ${e.message}",
+                    "Service onStartCommand failed: ${service.javaClass.simpleName}, ${e.message}",
                     e
                 )
             }
@@ -175,13 +201,13 @@ class CoreService : LifecycleService() {
      * 停止前台服务并销毁所有子服务
      */
     override fun onDestroy() {
-        Logger.i("服务销毁，正在清理子服务")
+        Logger.i("CoreService destroying, cleaning up child services")
 
         // 停止前台服务
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } catch (e: Exception) {
-            Logger.e("停止前台服务失败: ${e.message}", e)
+            Logger.e("Stop foreground failed: ${e.message}", e)
         }
 
         // 销毁所有子服务
@@ -191,18 +217,19 @@ class CoreService : LifecycleService() {
 
             services.forEach { service ->
                 try {
-                    Logger.i("正在销毁服务: ${service.javaClass.simpleName}")
+                    Logger.d("Destroying service: ${service.javaClass.simpleName}")
                     service.onDestroy()
                     successCount++
                 } catch (e: Exception) {
-                    Logger.e("销毁服务 ${service.javaClass.simpleName} 失败: ${e.message}", e)
+                    Logger.e(
+                        "Service destroy failed: ${service.javaClass.simpleName}, ${e.message}",
+                        e
+                    )
                     failureCount++
                 }
             }
 
-            Logger.i("服务销毁完成: 成功 $successCount 个，失败 $failureCount 个")
-        } else {
-            Logger.w("服务未初始化，跳过销毁")
+            Logger.i("CoreService destroyed: success=$successCount, failure=$failureCount")
         }
         
         super.onDestroy()
@@ -212,6 +239,7 @@ class CoreService : LifecycleService() {
         /**
          * 检查CoreService是否正在运行
          */
+        @Suppress("DEPRECATION")
         fun isRunning(context: Context): Boolean {
             val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             for (service in manager.getRunningServices(Integer.MAX_VALUE)) {
@@ -229,10 +257,10 @@ class CoreService : LifecycleService() {
             return try {
                 val intent = Intent(context, CoreService::class.java)
                 context.stopService(intent)
-                Logger.i("核心服务已停止")
+                Logger.i("CoreService stopped")
                 true
             } catch (e: Exception) {
-                Logger.e("停止服务时异常: ${e.message}", e)
+                Logger.e("Stop service failed: ${e.message}", e)
                 false
             }
         }
@@ -252,27 +280,30 @@ class CoreService : LifecycleService() {
                 true
 
             } catch (e: Exception) {
-                Logger.e("启动服务时未知异常: ${e.message}", e)
+                Logger.e("Start service failed: ${e.message}", e)
                 false
             }
         }
 
         /**
          * 重启核心服务
-         * 如果服务正在运行则先停止，然后启动
+         * 如果服务正在运行则先停止，然后启动。
+         * 等待与启动在后台线程执行，避免阻塞主线程导致页面切换卡顿。
          */
         fun restart(activity: Activity, intent: Intent? = null): Boolean {
             return try {
                 if (isRunning(activity)) {
-                    Logger.i("服务正在运行，先停止服务")
+                    Logger.i("CoreService running, stopping first")
                     stop(activity)
-                    // 等待服务完全停止
-                    Thread.sleep(1000)
                 }
-                Logger.i("启动服务")
+
+                Logger.i("Starting CoreService")
                 start(activity, intent)
+
+                true
+
             } catch (e: Exception) {
-                Logger.e("重启服务时异常: ${e.message}", e)
+                Logger.e("Restart service failed: ${e.message}", e)
                 false
             }
         }

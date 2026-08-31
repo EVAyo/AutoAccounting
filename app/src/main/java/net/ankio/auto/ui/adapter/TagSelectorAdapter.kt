@@ -20,17 +20,17 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.view.View
 import android.view.ViewGroup
-import androidx.core.graphics.toColorInt
 import androidx.recyclerview.widget.GridLayoutManager
 import com.google.android.material.chip.Chip
+import com.google.android.material.color.MaterialColors
 import com.google.android.material.textview.MaterialTextView
+import androidx.core.graphics.ColorUtils
 import net.ankio.auto.R
 import net.ankio.auto.databinding.AdapterTagListBinding
 import net.ankio.auto.ui.api.BaseAdapter
 import net.ankio.auto.ui.api.BaseViewHolder
-import net.ankio.auto.utils.ThemeUtils
-import net.ankio.auto.ui.utils.toThemeColor
 import org.ezbook.server.db.model.TagModel
+import net.ankio.auto.ui.utils.PaletteManager
 
 /**
  * 标签选择器适配器
@@ -42,44 +42,37 @@ import org.ezbook.server.db.model.TagModel
 class TagSelectorAdapter(
     private val onTagClick: (TagModel, String) -> Unit,
     private var isEditMode: Boolean = false,
+    private val selectionLimit: Int = 0,
+    private val onSelectionChanged: ((List<TagModel>) -> Unit)? = null,
+    private val onSelectionLimitReached: ((Int) -> Unit)? = null,
 
     ) : BaseAdapter<AdapterTagListBinding, TagModel>() {
 
+    /**
+     * 已选中的标签集合（仅选择模式使用）
+     */
     private val selectedTags: MutableList<TagModel> = mutableListOf()
+
+    /**
+     * 内部选择状态更新标记，用于避免触发递归回调
+     */
+    private var isInternalSelectionUpdate = false
+
+    /**
+     * 设置选中的标签集合（仅选择模式使用）
+     * @param selectedTags 选中的标签集合
+     */
     fun setSelectedTags(selectedTags: Set<TagModel>) {
         this.selectedTags.clear()
-        this.selectedTags.addAll(selectedTags)
-        notifyDataSetChanged()
+        this.selectedTags.addAll(
+            if (selectionLimit > 0) selectedTags.take(selectionLimit) else selectedTags
+        )
+        notifySelectionStateChanged()
     }
 
     companion object {
-        // 默认标签颜色
-        private const val DEFAULT_TAG_COLOR = "#E57373"
-
         // 分组标记常量
         private const val GROUP_MARKER = "-1"
-
-        // 夜间模式颜色调整参数
-        private const val DARK_MODE_SATURATION_FACTOR = 0.4f
-        private const val DARK_MODE_BRIGHTNESS_FACTOR = 0.6f
-        private const val DARK_MODE_MIN_SATURATION = 0.2f
-        private const val DARK_MODE_MIN_BRIGHTNESS = 0.15f
-        private const val DARK_MODE_MAX_BRIGHTNESS = 0.35f
-        private const val DARK_MODE_TEXT_SATURATION_OFFSET = 0.2f
-        private const val DARK_MODE_TEXT_BRIGHTNESS_OFFSET = 0.5f
-        private const val DARK_MODE_TEXT_MIN_BRIGHTNESS = 0.6f
-        private const val DARK_MODE_TEXT_MAX_BRIGHTNESS = 0.9f
-
-        // 浅色模式颜色调整参数
-        private const val LIGHT_MODE_SATURATION_FACTOR = 0.3f
-        private const val LIGHT_MODE_BRIGHTNESS_OFFSET = 0.4f
-        private const val LIGHT_MODE_MIN_SATURATION = 0.1f
-        private const val LIGHT_MODE_MIN_BRIGHTNESS = 0.85f
-        private const val LIGHT_MODE_MAX_BRIGHTNESS = 0.95f
-        private const val LIGHT_MODE_TEXT_SATURATION_OFFSET = 0.3f
-        private const val LIGHT_MODE_TEXT_BRIGHTNESS_OFFSET = -0.3f
-        private const val LIGHT_MODE_TEXT_MIN_BRIGHTNESS = 0.2f
-        private const val LIGHT_MODE_TEXT_MAX_BRIGHTNESS = 0.5f
     }
 
     override fun onBindViewHolder(
@@ -135,110 +128,82 @@ class TagSelectorAdapter(
     }
 
     /**
-     * 创建标签Chip
+     * 创建标签 Chip
      */
     private fun setChip(chip: Chip, tag: TagModel) {
         chip.text = tag.name
-        // 设置颜色 - 优化背景和前景色
-        val baseColor = try {
-            tag.color.toColorInt()
-        } catch (e: IllegalArgumentException) {
-            DEFAULT_TAG_COLOR.toColorInt()
-        }
-
-        // 根据主题模式计算背景色和前景色
-        val isDarkMode = ThemeUtils.isDark
-        val backgroundColor = getAdaptiveBackgroundColor(baseColor, isDarkMode)
-        val textColor = getAdaptiveTextColor(baseColor, isDarkMode)
-
-        chip.chipBackgroundColor = ColorStateList.valueOf(backgroundColor)
-        chip.setTextColor(textColor)
-
-        // 去掉边框，让chip看起来更简洁
-        chip.chipStrokeWidth = 0f
+        val isSelected = selectedTags.contains(tag)
+        // 根据选中态应用样式，避免重复逻辑
+        val textColor = applyChipStyle(chip, tag, isSelected)
 
         if (isEditMode) {
             // 编辑模式：显示删除按钮，长按编辑，点击不响应
             chip.isCheckable = false
             chip.isClickable = true
             chip.isCloseIconVisible = true
-
-            // 设置删除图标的颜色，与文字颜色保持一致以确保可见性
+            // 删除图标使用与文字一致的色调
             chip.closeIconTint = ColorStateList.valueOf(textColor)
-
-
         } else {
             // 选择模式：可选择，不显示删除按钮
             chip.isCheckable = true
             chip.isClickable = true
             chip.isCloseIconVisible = false
-
+            // 选中态仅通过颜色反馈，不使用图标
+            chip.isCheckedIconVisible = false
         }
 
-        chip.isSelected = selectedTags.contains(tag)
-    }
-
-    /**
-     * 获取适应主题的背景色
-     * @param baseColor 原始颜色
-     * @param isDarkMode 是否为夜间模式
-     * @return 适应主题的背景色
-     */
-    private fun getAdaptiveBackgroundColor(baseColor: Int, isDarkMode: Boolean): Int {
-        return adjustColor(baseColor, isDarkMode, isForText = false)
-    }
-
-    /**
-     * 获取适应主题的文字色
-     * @param baseColor 原始颜色
-     * @param isDarkMode 是否为夜间模式
-     * @return 适应主题的文字色
-     */
-    private fun getAdaptiveTextColor(baseColor: Int, isDarkMode: Boolean): Int {
-        return adjustColor(baseColor, isDarkMode, isForText = true)
-    }
-
-    /**
-     * 根据主题模式调整颜色
-     * @param baseColor 原始颜色
-     * @param isDarkMode 是否为夜间模式
-     * @param isForText 是否为文字颜色（否则为背景色）
-     * @return 调整后的颜色
-     */
-    private fun adjustColor(baseColor: Int, isDarkMode: Boolean, isForText: Boolean): Int {
-        val hsv = FloatArray(3)
-        Color.colorToHSV(baseColor, hsv)
-        val adjustedHsv = hsv.clone()
-
-        if (isDarkMode) {
-            if (isForText) {
-                // 夜间模式文字色：使用较亮的颜色
-                adjustedHsv[1] = (hsv[1] + DARK_MODE_TEXT_SATURATION_OFFSET).coerceAtMost(1.0f)
-                adjustedHsv[2] = (hsv[2] + DARK_MODE_TEXT_BRIGHTNESS_OFFSET)
-                    .coerceIn(DARK_MODE_TEXT_MIN_BRIGHTNESS, DARK_MODE_TEXT_MAX_BRIGHTNESS)
-            } else {
-                // 夜间模式背景色：降低饱和度，使用较低的明度
-                adjustedHsv[1] = (hsv[1] * DARK_MODE_SATURATION_FACTOR)
-                    .coerceAtLeast(DARK_MODE_MIN_SATURATION)
-                adjustedHsv[2] = (hsv[2] * DARK_MODE_BRIGHTNESS_FACTOR)
-                    .coerceIn(DARK_MODE_MIN_BRIGHTNESS, DARK_MODE_MAX_BRIGHTNESS)
-            }
-        } else {
-            if (isForText) {
-                // 浅色模式文字色：使用较深的颜色
-                adjustedHsv[1] = (hsv[1] + LIGHT_MODE_TEXT_SATURATION_OFFSET).coerceAtMost(1.0f)
-                adjustedHsv[2] = (hsv[2] + LIGHT_MODE_TEXT_BRIGHTNESS_OFFSET)
-                    .coerceIn(LIGHT_MODE_TEXT_MIN_BRIGHTNESS, LIGHT_MODE_TEXT_MAX_BRIGHTNESS)
-            } else {
-                // 浅色模式背景色：大幅降低饱和度，使用较高的明度
-                adjustedHsv[1] = (hsv[1] * LIGHT_MODE_SATURATION_FACTOR)
-                    .coerceAtLeast(LIGHT_MODE_MIN_SATURATION)
-                adjustedHsv[2] = (hsv[2] + LIGHT_MODE_BRIGHTNESS_OFFSET)
-                    .coerceIn(LIGHT_MODE_MIN_BRIGHTNESS, LIGHT_MODE_MAX_BRIGHTNESS)
-            }
+        // 绑定期间禁止触发回调，避免在布局计算中调用 notify
+        isInternalSelectionUpdate = true
+        try {
+            chip.isSelected = isSelected
+            chip.isChecked = isSelected
+        } finally {
+            isInternalSelectionUpdate = false
         }
+    }
 
-        return Color.HSVToColor(adjustedHsv)
+    /**
+     * 应用标签样式，集中处理颜色与描边逻辑
+     */
+    private fun applyChipStyle(chip: Chip, tag: TagModel, isSelected: Boolean): Int {
+        // 使用更清晰的对比，保证可读性
+        val surfaceColor = MaterialColors.getColor(
+            chip,
+            com.google.android.material.R.attr.colorSurfaceContainerLow
+        )
+        val surfaceStrongColor = MaterialColors.getColor(
+            chip,
+            com.google.android.material.R.attr.colorSurfaceContainerHighest
+        )
+        val defaultTextColor = MaterialColors.getColor(
+            chip,
+            com.google.android.material.R.attr.colorOnSurface
+        )
+        // 选中态与未选中态颜色统一交由调色板工具计算
+        val (textColor, backgroundColor, strokeColor) = PaletteManager.getSelectorTagColors(
+            chip.context,
+            tag.name,
+            defaultTextColor,
+            surfaceColor,
+            surfaceStrongColor,
+            isSelected
+        )
+
+        chip.chipBackgroundColor = ColorStateList.valueOf(backgroundColor)
+        chip.setTextColor(textColor)
+        // 细描边让标签更像 label，而不是按钮
+        val strokeWidth = (if (isSelected) 1.5f else 1.0f) * chip.resources.displayMetrics.density
+        chip.chipStrokeColor = ColorStateList.valueOf(strokeColor)
+        chip.chipStrokeWidth = strokeWidth
+        return textColor
+    }
+
+    /**
+     * 透明度处理，保持颜色主体但降低存在感
+     */
+    private fun applyAlpha(color: Int, alpha: Float): Int {
+        val clampedAlpha = (alpha.coerceIn(0f, 1f) * 255).toInt()
+        return Color.argb(clampedAlpha, Color.red(color), Color.green(color), Color.blue(color))
     }
 
 
@@ -257,7 +222,13 @@ class TagSelectorAdapter(
     fun clearSelection() {
         if (isEditMode) return
         selectedTags.clear()
-        notifyDataSetChanged()
+        notifySelectionStateChanged()
+    }
+
+    private fun notifySelectionStateChanged() {
+        if (itemCount > 0) {
+            notifyItemRangeChanged(0, itemCount)
+        }
     }
 
     override fun areItemsSame(oldItem: TagModel, newItem: TagModel): Boolean {
@@ -269,23 +240,44 @@ class TagSelectorAdapter(
     }
 
     override fun onInitViewHolder(holder: BaseViewHolder<AdapterTagListBinding, TagModel>) {
+        // 删除按钮仅在编辑模式下有效
         holder.binding.chip.setOnCloseIconClickListener {
+            if (!isEditMode) return@setOnCloseIconClickListener
             val tag = holder.item as TagModel
             onTagClick(tag, "delete")
         }
 
+        // 仅在编辑模式下处理点击编辑，选择模式交由 Checkable 处理
         holder.binding.chip.setOnClickListener {
+            if (!isEditMode) return@setOnClickListener
             val tag = holder.item as TagModel
             onTagClick(tag, "edit")
         }
 
-        holder.binding.chip.setOnCheckedChangeListener { _, isChecked ->
+        // 选择模式下监听勾选变化，负责维护选中集合与限制
+        holder.binding.chip.setOnCheckedChangeListener { buttonView, isChecked ->
+            if (isEditMode || isInternalSelectionUpdate) return@setOnCheckedChangeListener
             val tag = holder.item as TagModel
-            if (isChecked && !selectedTags.contains(tag)) {
-                selectedTags.add(tag)
-            } else if (!isChecked) {
+            if (isChecked) {
+                if (selectionLimit > 0 && selectedTags.size >= selectionLimit) {
+                    isInternalSelectionUpdate = true
+                    buttonView.isChecked = false
+                    isInternalSelectionUpdate = false
+                    // 回退选择后刷新样式，确保颜色与状态一致
+                    applyChipStyle(buttonView as Chip, tag, false)
+                    onSelectionLimitReached?.invoke(selectionLimit)
+                    return@setOnCheckedChangeListener
+                }
+                if (!selectedTags.contains(tag)) {
+                    selectedTags.add(tag)
+                }
+            } else {
                 selectedTags.remove(tag)
             }
+            onSelectionChanged?.invoke(selectedTags.toList())
+            // 直接更新样式，避免在布局计算中触发 notify
+            buttonView.isSelected = isChecked
+            applyChipStyle(buttonView as Chip, tag, isChecked)
         }
     }
 

@@ -116,6 +116,14 @@ object SettingUtils {
     // ===================== 常用配置（便捷封装） =====================
     // —— AI 功能开关 ——
 
+    /** AI功能总开关 */
+    suspend fun featureAiAvailable(): Boolean =
+        getBoolean(Setting.FEATURE_AI_AVAILABLE, DefaultData.FEATURE_AI_AVAILABLE)
+
+    /** 设置：AI功能总开关 */
+    suspend fun setFeatureAiAvailable(value: Boolean) =
+        setBoolean(Setting.FEATURE_AI_AVAILABLE, value)
+
     /** 使用AI识别账单 */
     suspend fun aiBillRecognition(): Boolean =
         getBoolean(Setting.AI_BILL_RECOGNITION, DefaultData.AI_BILL_RECOGNITION)
@@ -123,6 +131,14 @@ object SettingUtils {
     /** 设置：使用AI识别账单 */
     suspend fun setAiBillRecognition(value: Boolean) =
         setBoolean(Setting.AI_BILL_RECOGNITION, value)
+
+    /** 直接将图片发给大模型识别（需选择支持视觉的模型，如 gpt-4o、gemini-pro-vision、qwen-vl 等） */
+    suspend fun aiVisionRecognition(): Boolean =
+        getBoolean(Setting.AI_VISION_RECOGNITION, DefaultData.AI_VISION_RECOGNITION)
+
+    /** 设置：直接将图片发给大模型识别 */
+    suspend fun setAiVisionRecognition(value: Boolean) =
+        setBoolean(Setting.AI_VISION_RECOGNITION, value)
 
     /** 使用AI识别分类 */
     suspend fun aiCategoryRecognition(): Boolean =
@@ -148,6 +164,14 @@ object SettingUtils {
     suspend fun setAiMonthlySummary(value: Boolean) =
         setBoolean(Setting.AI_MONTHLY_SUMMARY, value)
 
+    /** 禁用规则参与匹配开关 - 命中禁用规则时跳过AI识别 */
+    suspend fun ruleMatchIncludeDisabled(): Boolean =
+        getBoolean(Setting.RULE_MATCH_INCLUDE_DISABLED, DefaultData.RULE_MATCH_INCLUDE_DISABLED)
+
+    /** 设置：禁用规则参与匹配开关 */
+    suspend fun setRuleMatchIncludeDisabled(value: Boolean) =
+        setBoolean(Setting.RULE_MATCH_INCLUDE_DISABLED, value)
+
     /** AI 总结自定义 Prompt */
     suspend fun aiSummaryPrompt(): String =
         getString(Setting.AI_SUMMARY_PROMPT, DefaultData.AI_SUMMARY_PROMPT)
@@ -155,6 +179,33 @@ object SettingUtils {
     /** 设置：AI 总结自定义 Prompt */
     suspend fun setAiSummaryPrompt(value: String) =
         setString(Setting.AI_SUMMARY_PROMPT, value)
+
+    /** AI账单识别提示词 */
+    suspend fun aiBillRecognitionPrompt(): String =
+        getString(Setting.AI_BILL_RECOGNITION_PROMPT, DefaultData.AI_BILL_RECOGNITION_PROMPT)
+
+    /** 设置：AI账单识别提示词 */
+    suspend fun setAiBillRecognitionPrompt(value: String) =
+        setString(Setting.AI_BILL_RECOGNITION_PROMPT, value)
+
+    /** AI资产映射提示词 */
+    suspend fun aiAssetMappingPrompt(): String =
+        getString(Setting.AI_ASSET_MAPPING_PROMPT, DefaultData.AI_ASSET_MAPPING_PROMPT)
+
+    /** 设置：AI资产映射提示词 */
+    suspend fun setAiAssetMappingPrompt(value: String) =
+        setString(Setting.AI_ASSET_MAPPING_PROMPT, value)
+
+    /** AI分类识别提示词 */
+    suspend fun aiCategoryRecognitionPrompt(): String =
+        getString(
+            Setting.AI_CATEGORY_RECOGNITION_PROMPT,
+            DefaultData.AI_CATEGORY_RECOGNITION_PROMPT
+        )
+
+    /** 设置：AI分类识别提示词 */
+    suspend fun setAiCategoryRecognitionPrompt(value: String) =
+        setString(Setting.AI_CATEGORY_RECOGNITION_PROMPT, value)
 
     // —— AI 接入参数 ——
 
@@ -184,7 +235,7 @@ object SettingUtils {
 
 
     /** 调试开关（Server.logD 用） */
-    suspend fun debugMode(): Boolean = getBoolean(Setting.DEBUG_MODE, Server.debug)
+    suspend fun debugMode(): Boolean = getBoolean(Setting.DEBUG_MODE, Server.debugPackage)
 
     /** 注入的通用 JS（RuleGenerator 用） */
     suspend fun jsCommon(): String = getString(Setting.JS_COMMON, DefaultData.JS_COMMON)
@@ -198,6 +249,18 @@ object SettingUtils {
 
     /** 自动去重（BillManager 用） */
     suspend fun autoGroup(): Boolean = getBoolean(Setting.AUTO_GROUP, DefaultData.AUTO_GROUP)
+
+    /** 自动去重时间阈值（秒） */
+    suspend fun autoGroupTimeThreshold(): Int =
+        getInt(Setting.AUTO_GROUP_TIME_THRESHOLD, DefaultData.AUTO_GROUP_TIME_THRESHOLD)
+
+    /** 自动识别转账账单 */
+    suspend fun autoTransferRecognition(): Boolean =
+        getBoolean(Setting.AUTO_TRANSFER_RECOGNITION, DefaultData.AUTO_TRANSFER_RECOGNITION)
+
+    /** 转账账单合并时间阈值（秒） */
+    suspend fun autoTransferTimeThreshold(): Int =
+        getInt(Setting.AUTO_TRANSFER_TIME_THRESHOLD, DefaultData.AUTO_TRANSFER_TIME_THRESHOLD)
 
     /** 功能：资产管理（AssetsMap 用） */
     suspend fun featureAssetManager(): Boolean =
@@ -221,6 +284,14 @@ object SettingUtils {
 
     suspend fun autoAssetMap(): Boolean =
         getBoolean(Setting.AUTO_ASSET_MAPPING, DefaultData.AUTO_ASSET_MAPPING)
+
+    /** 本位币（默认 CNY） */
+    suspend fun baseCurrency(): String =
+        getString(Setting.SETTING_BASE_CURRENCY, DefaultData.SETTING_BASE_CURRENCY)
+
+    /** 多币种开关 */
+    suspend fun featureMultiCurrency(): Boolean =
+        getBoolean(Setting.SETTING_CURRENCY_MANAGER, DefaultData.SETTING_CURRENCY_MANAGER)
 
     suspend fun ruleVersion(): String =
         getString(Setting.RULE_VERSION, DefaultData.RULE_VERSION)

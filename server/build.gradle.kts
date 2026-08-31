@@ -8,7 +8,7 @@ plugins {
 /* ---------- Android config ---------- */
 android {
     namespace = "org.ezbook.server"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 24
@@ -30,7 +30,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
     }
-    kotlinOptions { jvmTarget = "21" }
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+        }
+    }
 
     /* AGP 8.x 新写法：packaging → resources.excludes / jniLibs.excludes */
     packaging {
@@ -38,13 +42,6 @@ android {
             "META-INF/*"
         )
     }
-}
-
-/* ---------- repositories ---------- */
-repositories {
-    google() // Required for Android dependencies
-    mavenCentral() // Required for KSP and other dependencies
-    maven { url = uri("https://www.jitpack.io") }
 }
 
 /* ---------- dependencies ---------- */
@@ -66,4 +63,9 @@ dependencies {
     implementation(libs.ktor.server.netty)
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.gson)
+
+    // Kotlin反射 - Ktor的reified泛型需要
+    implementation(kotlin("reflect"))
+
+    testImplementation(libs.junit)
 }

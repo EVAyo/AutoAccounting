@@ -17,12 +17,14 @@ package net.ankio.auto.ui.dialog.components
 
 import android.content.res.ColorStateList
 import android.text.InputType
+import android.view.View
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
 import androidx.core.widget.TextViewCompat
 import net.ankio.auto.R
 import net.ankio.auto.databinding.ComponentAmountDisplayBinding
+import net.ankio.auto.storage.Logger
 import net.ankio.auto.ui.api.BaseComponent
 import net.ankio.auto.ui.api.BaseSheetDialog
 import net.ankio.auto.ui.dialog.BillEditorDialog
@@ -33,6 +35,7 @@ import net.ankio.auto.utils.BillTool
 import net.ankio.auto.utils.PrefManager
 import org.ezbook.server.constant.BillType
 import org.ezbook.server.db.model.BillInfoModel
+import java.text.NumberFormat
 import kotlin.math.abs
 
 /**
@@ -57,7 +60,6 @@ class AmountDisplayComponent(
 
     private var currentBillType: BillType = BillType.Expend
 
-
     private lateinit var billInfoModel: BillInfoModel
 
     /**
@@ -78,12 +80,31 @@ class AmountDisplayComponent(
         // 更新金额显示
         setAmount(billInfoModel.money)
 
+        // 更新本位币换算显示
+        updateConversionDisplay()
+
         // 更新账单类型
         currentBillType = BillTool.getType(billInfoModel.type)
         setBillType(currentBillType)
 
         // 更新费用显示
         setFeeDisplay(billInfoModel.fee)
+
+        // 更新标志位显示
+        updateFlagDisplay()
+    }
+
+    /**
+     * 更新本位币换算金额显示
+     */
+    private fun updateConversionDisplay() {
+        val text = BillTool.getConversionText(billInfoModel)
+        if (text != null) {
+            binding.convertedAmount.text = text
+            binding.convertedAmount.visibility = View.VISIBLE
+        } else {
+            binding.convertedAmount.visibility = View.GONE
+        }
     }
 
     /**
@@ -100,6 +121,9 @@ class AmountDisplayComponent(
 
         // 设置费用编辑点击监听器  
         setupFeeEditor()
+
+        // 设置标志位芯片点击监听器
+        setupFlagChips()
     }
 
     /**
@@ -173,7 +197,8 @@ class AmountDisplayComponent(
                             InputType.TYPE_NUMBER_FLAG_SIGNED
                 )
                 .setTitleInt(R.string.edit_fee)
-                .setMessage(billInfoModel.fee.toString())
+                .setHint(R.string.hint_fee)
+                .setMessage(if (billInfoModel.fee == 0.0) "" else billInfoModel.fee.toString())
                 .setEditorPositiveButton(R.string.sure_msg) { result ->
                     val newFee = result.toDoubleOrNull() ?: 0.0
                     if (newFee != billInfoModel.fee) {
@@ -187,12 +212,43 @@ class AmountDisplayComponent(
     }
 
     /**
+     * 设置标志位芯片
+     */
+    private fun setupFlagChips() {
+        // 确保芯片可勾选，点击即可切换状态
+        binding.noIncomeExpenseLabel.isCheckable = true
+        binding.noBudgetLabel.isCheckable = true
+
+        binding.noIncomeExpenseLabel.setOnClickListener {
+            if (!::billInfoModel.isInitialized) return@setOnClickListener
+            // 未启用设置时忽略点击，避免与全局开关冲突
+            if (!PrefManager.billFlagNotCount) return@setOnClickListener
+            // 用户点击后同步“不计收支”标志位
+            billInfoModel.setFlag(
+                BillInfoModel.FLAG_NOT_COUNT,
+                binding.noIncomeExpenseLabel.isChecked
+            )
+        }
+
+        binding.noBudgetLabel.setOnClickListener {
+            if (!::billInfoModel.isInitialized) return@setOnClickListener
+            // 未启用设置时忽略点击，避免与全局开关冲突
+            if (!PrefManager.billFlagNotBudget) return@setOnClickListener
+            // 用户点击后同步“不计预算”标志位
+            billInfoModel.setFlag(
+                BillInfoModel.FLAG_NOT_BUDGET,
+                binding.noBudgetLabel.isChecked
+            )
+        }
+    }
+
+    /**
      * 设置金额显示
      *
      * @param amount 金额数值
      */
     private fun setAmount(amount: Double) {
-        binding.amountContainer.text = amount.toString()
+        binding.amountContainer.text = NumberFormat.getNumberInstance().format(amount)
     }
 
     /**
@@ -233,6 +289,22 @@ class AmountDisplayComponent(
             else -> context.getString(R.string.discounted, fee)
         }
         binding.feeContainer.text = text
+    }
+
+    /**
+     * 更新标志位芯片显示状态
+     */
+    private fun updateFlagDisplay() {
+        if (!::billInfoModel.isInitialized) return
+        // 根据设置开关控制可见性与可用性，确保组件状态与全局配置一致
+        binding.noIncomeExpenseLabel.isVisible = PrefManager.billFlagNotCount
+        binding.noIncomeExpenseLabel.isEnabled = PrefManager.billFlagNotCount
+        binding.noBudgetLabel.isVisible = PrefManager.billFlagNotBudget
+        binding.noBudgetLabel.isEnabled = PrefManager.billFlagNotBudget
+        binding.noIncomeExpenseLabel.isChecked =
+            billInfoModel.hasFlag(BillInfoModel.FLAG_NOT_COUNT)
+        binding.noBudgetLabel.isChecked =
+            billInfoModel.hasFlag(BillInfoModel.FLAG_NOT_BUDGET)
     }
 
 

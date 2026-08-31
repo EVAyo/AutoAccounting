@@ -57,6 +57,7 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:baselineAligned="false"
                 android:orientation="horizontal"
                 android:layout_marginBottom="16dp">
 
@@ -125,6 +126,7 @@
                     android:layout_height="40dp"
                     android:layout_marginEnd="12dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
+                    android:importantForAccessibility="no"
                     android:scaleType="fitCenter"
                     android:padding="6dp"
                     android:tint="?colorPrimary"

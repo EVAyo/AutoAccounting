@@ -135,34 +135,8 @@ class BillSelectorDialog internal constructor(
         binding.statusPage.showLoading()
 
         launch {
-            syncDataIfNeeded()
             loadDataWithTimeout()
-        }
-    }
 
-    /**
-     * 同步数据（如果需要）
-     */
-    private suspend fun syncDataIfNeeded() = withContext(Dispatchers.IO) {
-        try {
-            // 清空现有数据
-            BookBillAPI.put(arrayListOf(), "", billType.name)
-
-            // 检查同步间隔
-            val lastSyncTime = PrefManager.lastSyncTime
-            val now = System.currentTimeMillis()
-
-            if (now - lastSyncTime > Constants.SYNC_INTERVAL) {
-                PrefManager.lastSyncTime = now
-
-                // 通过适配器触发目标应用同步（需在主线程启动 Activity）
-                withContext(Dispatchers.Main) {
-                    AppAdapterManager.adapter().syncWaitBills(billType, bookName)
-                }
-                Logger.d("同步完成，账单类型: $billType")
-            }
-        } catch (e: Exception) {
-            Logger.e("同步数据失败", e)
         }
     }
 
@@ -172,8 +146,13 @@ class BillSelectorDialog internal constructor(
      * - 非主动模式：立即拉取一次，若为空直接返回
      */
     private suspend fun loadDataWithTimeout() = withContext(Dispatchers.IO) {
-        val timeoutMs = 3_000L
-
+        val timeoutMs = 30_000L
+        BookBillAPI.put(arrayListOf(), "", billType.name)
+        withContext(Dispatchers.Main) {
+            AppAdapterManager.adapter().syncWaitBills(billType, bookName)
+        }
+        // 按需求：进入页面先发起请求并显示 loading，2 秒后再开始检查数据
+        delay(2_000)
         val bills = withTimeoutOrNull(timeoutMs) {
             val result: List<BookBillModel>
             while (true) {

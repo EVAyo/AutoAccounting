@@ -17,7 +17,6 @@ package net.ankio.auto.xposed.hooks.qianji
 
 import net.ankio.auto.xposed.core.api.HookerManifest
 import net.ankio.auto.xposed.core.api.PartHooker
-import net.ankio.auto.xposed.core.utils.MessageUtils
 import net.ankio.auto.xposed.hooks.qianji.activity.AddBillIntentAct
 import net.ankio.auto.xposed.hooks.qianji.activity.MainActivity
 import net.ankio.auto.xposed.hooks.qianji.activity.MainDrawerLayout
@@ -34,6 +33,7 @@ import net.ankio.auto.xposed.hooks.qianji.filter.TypesFilter
 import net.ankio.auto.xposed.hooks.qianji.helper.AssetDbHelper
 import net.ankio.auto.xposed.hooks.qianji.helper.BillDbHelper
 import net.ankio.auto.xposed.hooks.qianji.hooks.AutoHooker
+import net.ankio.auto.xposed.hooks.qianji.hooks.DbHooker
 import net.ankio.auto.xposed.hooks.qianji.hooks.SideBarHooker
 import net.ankio.auto.xposed.hooks.qianji.impl.AssetPreviewPresenterImpl
 import net.ankio.auto.xposed.hooks.qianji.impl.BaseSubmitAssetPresenterImpl
@@ -43,21 +43,22 @@ import net.ankio.auto.xposed.hooks.qianji.impl.CateInitPresenterImpl
 import net.ankio.auto.xposed.hooks.qianji.impl.GetCategoryListInterface
 import net.ankio.auto.xposed.hooks.qianji.impl.RefundPresenterImpl
 import net.ankio.auto.xposed.hooks.qianji.impl.SearchPresenterImpl
+import net.ankio.auto.xposed.hooks.qianji.impl.TagRefreshPresenterImpl
 import net.ankio.auto.xposed.hooks.qianji.impl.ViewInterface
-import net.ankio.auto.xposed.hooks.qianji.models.QjAssetAccountModel
 import net.ankio.auto.xposed.hooks.qianji.models.AutoTaskLogModel
 import net.ankio.auto.xposed.hooks.qianji.models.BillExtraModel
+import net.ankio.auto.xposed.hooks.qianji.models.CurrencyExtraModel
+import net.ankio.auto.xposed.hooks.qianji.models.LoanInfoModel
+import net.ankio.auto.xposed.hooks.qianji.models.QjAssetAccountModel
 import net.ankio.auto.xposed.hooks.qianji.models.QjBillModel
 import net.ankio.auto.xposed.hooks.qianji.models.QjBookModel
 import net.ankio.auto.xposed.hooks.qianji.models.QjCategoryModel
-import net.ankio.auto.xposed.hooks.qianji.models.LoanInfoModel
 import net.ankio.auto.xposed.hooks.qianji.models.QjTagModel
 import net.ankio.auto.xposed.hooks.qianji.models.UserModel
+import net.ankio.auto.xposed.hooks.qianji.sync.SyncClazz
 import net.ankio.auto.xposed.hooks.qianji.utils.BroadcastUtils
 import net.ankio.auto.xposed.hooks.qianji.utils.TimeRecordUtils
 import net.ankio.dex.model.Clazz
-import net.ankio.dex.model.ClazzField
-import net.ankio.dex.model.ClazzMethod
 
 class QianjiHooker : HookerManifest() {
     override val packageName: String
@@ -75,6 +76,7 @@ class QianjiHooker : HookerManifest() {
         get() = mutableListOf(
             SideBarHooker(),
             AutoHooker(),
+            DbHooker()
         )
         set(value) {}
     override var rules: MutableList<Clazz>
@@ -127,7 +129,10 @@ class QianjiHooker : HookerManifest() {
             TypesFilter.rule,
 
             BaseSubmitAssetPresenterImpl.rule,
-            ViewInterface.rule
+            ViewInterface.rule,
+            TagRefreshPresenterImpl.rule,
+            SyncClazz.rule,
+            CurrencyExtraModel.rule
         )
         set(value) {}
 

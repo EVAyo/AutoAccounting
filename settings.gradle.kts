@@ -21,3 +21,6 @@ rootProject.name = "AutoAccounting"
 include(":app", ":dex", ":server")
 include(":shell")
 include(":ocr")
+include(":test")
+include(":hook:")
+include(":tap:")

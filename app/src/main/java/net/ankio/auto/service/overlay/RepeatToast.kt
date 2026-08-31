@@ -23,9 +23,11 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.TextView
 import net.ankio.auto.R
 import net.ankio.auto.storage.Logger
+import net.ankio.auto.ui.utils.ToastUtils
 import net.ankio.auto.utils.toThemeCtx
 
 /**
@@ -78,7 +80,8 @@ class RepeatToast(
 
         // 视图使用主题化的 Context 进行膨胀，保证主题属性可用
         val themedCtx = context.toThemeCtx()
-        val view = LayoutInflater.from(themedCtx).inflate(R.layout.repeat_toast, null)
+        val inflationParent = FrameLayout(themedCtx)
+        val view = LayoutInflater.from(themedCtx).inflate(R.layout.repeat_toast, inflationParent, false)
         rootView = view
 
         val msgView = view.findViewById<TextView>(R.id.message)
@@ -107,7 +110,7 @@ class RepeatToast(
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            gravity = ToastUtils.position() or Gravity.CENTER_HORIZONTAL
             y = 200
             // 不设置动画，保持简单稳定
         }
@@ -154,4 +157,4 @@ class RepeatToast(
             }.onFailure { Logger.w("RepeatToast removeView failed: ${it.message}") }
         }
     }
-} 
+}

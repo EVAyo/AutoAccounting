@@ -31,6 +31,7 @@ package net.ankio.auto.xposed.hooks.qianji.debt/*
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import net.ankio.auto.xposed.core.logger.XposedLogger
 import net.ankio.auto.xposed.core.utils.AppRuntime
 import net.ankio.auto.xposed.hooks.qianji.impl.AssetPreviewPresenterImpl
 import net.ankio.auto.xposed.hooks.qianji.impl.BookManagerImpl
@@ -54,7 +55,7 @@ class ExpendRepaymentUtils :
 
         val book = BookManagerImpl.getBookByName(billModel.bookName)
 
-        AppRuntime.manifest.d("收款: ${billModel.money} ${billModel.accountNameFrom} -> ${billModel.accountNameTo}")
+        XposedLogger.d("repayment ${billModel.money} ${billModel.accountNameFrom} -> ${billModel.accountNameTo}")
 
         //拆分账单
 
@@ -65,8 +66,8 @@ class ExpendRepaymentUtils :
             saveBill(bill)
         }
 
-        // 更新loan
-        updateLoan(bill1!!, accountFrom)
+        // 更新债主的还款进度；扣款资产不是债务账户
+        updateLoan(bill1!!, accountTo)
         // 更新资产
         updateAsset(accountFrom, accountTo, bill1)
 

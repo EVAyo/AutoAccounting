@@ -17,6 +17,9 @@ except Exception:
 
 flavors = ['release']  # 项目只有一个标准构建版本
 
+# 所有 HTTP 请求的统一请求头
+DEFAULT_HEADERS = {"x-cf-user": "ankio"}
+
 def get_latest_tag_with_prefix(prefix):
     print(f"获取最新的 tag: {prefix}")
 
@@ -86,7 +89,7 @@ def get_commits_since_tag(tag):
 def get_and_set_version(channel,workspace):
     with open(workspace + '/app/build.gradle.kts') as file:
         content = file.read()
-    versionName = re.search(r'versionName = "(.*)"', content).group(1)
+    versionName = re.search(r'val appVersionName = "(.*)"', content).group(1)
     print(f"versionName: {versionName}")
     
     # 获取版本代码 (需要先计算)
@@ -96,7 +99,7 @@ def get_and_set_version(channel,workspace):
     # 新的版本号
     tagVersionName = f"{versionName}-{channel}.{datetime.datetime.now().strftime('%Y%m%d_%H%M')}"
     # 替换 versionName
-    content = re.sub(r'versionName = "(.*)"', f'versionName = "{tagVersionName}"', content)
+    content = re.sub(r'val appVersionName = "(.*)"', f'val appVersionName = "{tagVersionName}"', content)
     with open(workspace+'/app/build.gradle.kts', 'w') as file:
         file.write(content)
     return tagVersionName, versionCode
@@ -258,6 +261,7 @@ def upload_single_attempt(filename, filename_new, channel, timeout=300):
     url2 = "https://cloud.ankio.net/api/fs/put"
     filename_new = quote('/自动记账/自动记账/版本更新/' + channel + "/" + filename_new, 'utf-8')
     headers = {
+        **DEFAULT_HEADERS,
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
                       'Chrome/58.0.3029.110 Safari/537.3',
         'Authorization': os.getenv("ALIST_TOKEN"),
@@ -331,6 +335,7 @@ def publish_to_github(repo, tag_name, release_name, release_body, file_path, pre
     # 创建 release
     create_release_url = f"https://api.github.com/repos/{repo}/releases"
     headers = {
+        **DEFAULT_HEADERS,
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json"
     }
@@ -360,6 +365,7 @@ def publish_to_github(repo, tag_name, release_name, release_body, file_path, pre
         upload_response = requests.post(
             upload_url + f"?name={file_name}",
             headers={
+                **DEFAULT_HEADERS,
                 "Authorization": f"token {token}",
                 "Accept": "application/vnd.github.v3+json",
                 "Content-Type": "application/octet-stream"  # 明确指定上传内容类型
@@ -421,6 +427,11 @@ def truncate_content(content):
         # 如果长度不超过 4000，返回原字符串
         return content
 def send_apk_with_changelog(workspace, title):
+    """
+    发送 APK 和更新日志到 Telegram
+    优先尝试发送媒体组，失败则降级为纯文本消息
+    确保无论如何都会通知用户
+    """
     # 读取更新日志
     with open(workspace + '/dist/README.md', 'r', encoding='utf-8') as file:
         content = file.read()
@@ -429,10 +440,11 @@ def send_apk_with_changelog(workspace, title):
     channel_id = "@qianji_auto"
     base_url = f"https://api.telegram.org/bot{token}"
     
-    # 上传 APK 文件
+    # 尝试上传 APK 文件
     file_ids = []
     file_path = os.path.join(workspace, 'dist', 'app-release-signed.apk')
     new_name = f"{title}-release.apk"
+    upload_success = False
     
     try:
         with open(file_path, "rb") as apk_file:
@@ -442,85 +454,116 @@ def send_apk_with_changelog(workspace, title):
                     "chat_id": "@ezbook_archives",
                     "caption": "" # 空的说明文本
                 },
-                files={"document": (new_name, apk_file)}
+                files={"document": (new_name, apk_file)},
+                headers=DEFAULT_HEADERS
             )
             response.raise_for_status()
             file_id = response.json()['result']['document']['file_id']
             file_ids.append(file_id)
-            print(f"成功上传 release 版本")
+            upload_success = True
+            print(f"成功上传 release 版本到归档频道")
     except Exception as e:
-        print(f"上传 release 版本时出错: {str(e)}")
+        print(f"警告: 上传 release 版本时出错: {str(e)}")
+        print("将降级为纯文本消息")
     
-    # 构建媒体组
-    media = []
-    for i, file_id in enumerate(file_ids):
-        item = {
-            "type": "document",
-            "media": file_id,
-        }
-        # 在最后一个文件添加说明文本
-        if i == len(file_ids) - 1:
-            item.update({
-                "caption": truncate_content(content),
-                "parse_mode": "MarkdownV2"
-            })
-        media.append(item)
-    
-    # 发送媒体组
-    try:
-        response = requests.post(
-            f"{base_url}/sendMediaGroup",
-            json={
-                "chat_id": channel_id,
-                "media": media
-            }
-        )
-        response.raise_for_status()
-        print("成功发送所有APK文件")
-    except Exception as e:
-        print(f"发送媒体组时出错: {str(e)}")
-        print(f"错误详情: {response.text if 'response' in locals() else '无响应'}")
-
-
-def send_forums( title, channel,workspace):
-    if channel != 'Stable':
-        print("非正式版，不发送到论坛")
-        return
-    with open(workspace + '/dist/README.md', 'r', encoding='utf-8') as file:
-        content = file.read()
-    url = "https://forum.ez-book.org/api/discussions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": "Token " + os.getenv("FORUMS_API_TOKEN"),
-    }
-
-    data = {
-        "data": {
-            "type": "discussions",
-            "attributes": {
-                "title": title,
-                "content": content
-            },
-            "relationships": {
-                "tags": {
-                    "data": [
-                        {
-                            "type": "tags",
-                            "id": "5"
-                        }
-                    ]
+    # 尝试发送媒体组（如果上传成功）
+    message_sent = False
+    if upload_success and file_ids:
+        try:
+            media = []
+            for i, file_id in enumerate(file_ids):
+                item = {
+                    "type": "document",
+                    "media": file_id,
                 }
-            }
-        }
-    }
-    response = requests.post(url, headers=headers, data=json.dumps(data))
-    print(response.json())
+                # 在最后一个文件添加说明文本
+                if i == len(file_ids) - 1:
+                    item.update({
+                        "caption": truncate_content(content),
+                        "parse_mode": "MarkdownV2"
+                    })
+                media.append(item)
+            
+            response = requests.post(
+                f"{base_url}/sendMediaGroup",
+                json={
+                    "chat_id": channel_id,
+                    "media": media
+                },
+                headers=DEFAULT_HEADERS
+            )
+            response.raise_for_status()
+            message_sent = True
+            print("成功发送带 APK 的媒体组消息")
+        except Exception as e:
+            print(f"警告: 发送媒体组时出错: {str(e)}")
+            print(f"错误详情: {response.text if 'response' in locals() else '无响应'}")
+            print("将降级为纯文本消息")
+    
+    # 降级方案：发送纯文本消息
+    if not message_sent:
+        try:
+            response = requests.post(
+                f"{base_url}/sendMessage",
+                json={
+                    "chat_id": channel_id,
+                    "text": truncate_content(content),
+                    "parse_mode": "MarkdownV2",
+                    "disable_web_page_preview": True
+                },
+                headers=DEFAULT_HEADERS
+            )
+            response.raise_for_status()
+            print("成功发送纯文本更新通知（降级方案）")
+        except Exception as e:
+            print(f"错误: 发送纯文本消息也失败: {str(e)}")
+            print(f"错误详情: {response.text if 'response' in locals() else '无响应'}")
+            # 即使失败也不抛异常，避免中断整个发布流程
+            print("警告: Telegram 通知完全失败，但不影响发布流程")
+
+
+def send_qq_bot_notification(tag, log_data, repo, commit_count):
+    """
+    稳定版发布时通过 QQ 机器人推送通知（参考 AutoRuleSubmit release.js）。
+    使用 BOT_URL 和 BOT_GROUP_ID 环境变量，未配置时静默跳过。
+    """
+    bot_url = os.getenv("BOT_URL")
+    group_id = os.getenv("BOT_GROUP_ID")
+    if not bot_url or not group_id:
+        print("⚠️ 未提供 BOT_URL 或 BOT_GROUP_ID，跳过 QQ 通知")
+        return
+    print("📢 正在发送 QQ 机器人通知...")
+    try:
+        # 日志过长时截断，避免 QQ 消息超限
+        max_log_len = 800
+        log_text = log_data[:max_log_len] + "..." if len(log_data) > max_log_len else log_data
+        msg = (
+            f"🎉 自动记账新版本发布: {tag}\n\n"
+            f"📦 仓库: {repo}\n"
+            f"📊 提交数: {commit_count}\n\n"
+            f"{log_text}"
+        )
+        data = {"msg": msg, "group_id": group_id}
+        resp = requests.post(
+            bot_url,
+            data=data,
+            headers={**DEFAULT_HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30
+        )
+        if not resp.ok:
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
+        print("✅ QQ 机器人通知发送成功")
+    except Exception as e:
+        print(f"⚠️ QQ 机器人通知发送失败: {e}，不影响发布流程")
+
+
 """
 通知
 """
-def notify(title,channel,workspace):
-    send_forums( title,channel,workspace)
-    send_apk_with_changelog( workspace,title)
+def notify(title, channel, workspace, log_data, commits, repo):
+    send_apk_with_changelog(workspace, title)
+    if channel == "Stable":
+        send_qq_bot_notification(title, log_data, repo, len(commits))
 
 
 def main(repo):
@@ -545,8 +588,8 @@ def main(repo):
     # 1. GitHub发布（最重要，用户主要下载源）
     publish_apk(repo, tagVersionName,workspace,log_data,channel)
     
-    # 2. 通知服务（Telegram、论坛 - 用户需要及时知道更新）
-    notify(tagVersionName, channel, workspace)
+    # 2. 通知服务（Telegram、QQ 机器人 - 用户需要及时知道更新）
+    notify(tagVersionName, channel, workspace, log_data, commits, repo)
     
     # 3. 网盘上传（备用下载源，失败不影响主要流程）
     print("开始网盘上传（备用下载源）...")

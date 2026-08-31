@@ -18,33 +18,26 @@ package net.ankio.auto.ui.dialog.components
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.View
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleCoroutineScope
-import androidx.lifecycle.LifecycleOwner
-import kotlinx.coroutines.launch
+import net.ankio.auto.R
 import net.ankio.auto.databinding.ComponentBasicInfoBinding
-import net.ankio.auto.ui.api.BaseComponent
 import net.ankio.auto.http.api.BookNameAPI
-import net.ankio.auto.utils.PrefManager
-import net.ankio.auto.ui.dialog.CategorySelectorDialog
-import net.ankio.auto.ui.dialog.DateTimePickerDialog
-import net.ankio.auto.ui.utils.ListPopupUtilsGeneric
-import net.ankio.auto.ui.adapter.CurrencyDropdownAdapter
-import android.widget.ListPopupWindow
+import net.ankio.auto.ui.api.BaseComponent
 import net.ankio.auto.ui.api.BaseSheetDialog
+import net.ankio.auto.ui.dialog.CategorySelectorDialog
+import net.ankio.auto.ui.dialog.BillEditorDialog
+import net.ankio.auto.ui.dialog.CurrencySelectorDialog
+import net.ankio.auto.ui.dialog.DateTimePickerDialog
+import net.ankio.auto.ui.dialog.TagSelectorDialog
+import net.ankio.auto.ui.utils.TagUtils
 import net.ankio.auto.ui.utils.load
 import net.ankio.auto.ui.utils.setCategoryIcon
-import net.ankio.auto.ui.utils.setAssetIcon
 import net.ankio.auto.utils.BillTool
 import net.ankio.auto.utils.DateUtils
-import net.ankio.auto.utils.SystemUtils.findLifecycleOwner
+import net.ankio.auto.utils.PrefManager
 import org.ezbook.server.constant.BillType
 import org.ezbook.server.constant.Currency
-import org.ezbook.server.constant.DefaultData
-import org.ezbook.server.constant.Setting
 import org.ezbook.server.db.model.BillInfoModel
 import org.ezbook.server.db.model.BookNameModel
-import org.ezbook.server.db.model.CategoryModel
 
 /**
  * 基础信息组件 - 参考BookHeaderComponent的独立设计模式
@@ -100,6 +93,9 @@ class BasicInfoComponent(
         // 更新时间显示
         binding.time.setText(DateUtils.stampToDate(billInfoModel.time))
 
+        // 更新标签显示
+        updateTagDisplay()
+
         // 更新备注
         binding.remark.setText(billInfoModel.remark)
 
@@ -109,6 +105,8 @@ class BasicInfoComponent(
         } else {
             View.VISIBLE
         }
+
+
     }
 
     /**
@@ -135,8 +133,10 @@ class BasicInfoComponent(
             return
         }
 
+        // 从 CurrencyModel JSON 中提取币种代码
+        val currencyCode = billInfoModel.currencyCode()
         val currency =
-            runCatching { Currency.valueOf(billInfoModel.currency) }.getOrDefault(Currency.CNY)
+            runCatching { Currency.valueOf(currencyCode) }.getOrDefault(Currency.CNY)
         binding.moneyType.setText(currency.name(context))
         binding.moneyType.imageView().load(currency.iconUrl())
         // 确保货币图标不被染色，保持原始颜色
@@ -176,6 +176,10 @@ class BasicInfoComponent(
 
         binding.time.setOnClickListener {
             showTimeSelector()
+        }
+
+        binding.tagLabels.setOnClickListener {
+            showTagSelector()
         }
 
         binding.moneyType.setOnClickListener {
@@ -231,47 +235,74 @@ class BasicInfoComponent(
     }
 
     /**
-     * 显示货币选择列表 - 使用带图标的CurrencyDropdownAdapter
+     * 显示标签选择对话框
+     */
+    private fun showTagSelector() {
+        if (!::billInfoModel.isInitialized) {
+            return
+        }
+
+        BaseSheetDialog.create<TagSelectorDialog>(context)
+            .setSelectedTags(billInfoModel.getTagList())
+            .setCallback { selectedTags ->
+                billInfoModel.setTagList(selectedTags)
+                updateTagDisplay()
+            }
+            .show()
+    }
+
+    /**
+     * 显示货币选择弹窗 - 展示用户常用币种列表，支持搜索
      */
     private fun showCurrencySelector() {
         if (!::billInfoModel.isInitialized) {
             return
         }
 
-        // 获取当前选中的货币
-        val currentCurrency = runCatching {
-            Currency.valueOf(billInfoModel.currency)
-        }.getOrDefault(Currency.CNY)
+        // 当前币种作为预选
+        val currentCode = billInfoModel.currencyCode()
+        val currentCodes = setOf(currentCode)
 
-        // 创建货币列表
-        val currencyList = Currency.entries.toList()
-
-        // 创建带图标的货币适配器
-        val adapter = CurrencyDropdownAdapter(context, currencyList)
-
-        // 创建ListPopupWindow显示选择列表
-        val popupWindow = ListPopupWindow(context).apply {
-            setAdapter(adapter)
-            anchorView = binding.moneyType
-            width = ListPopupWindow.WRAP_CONTENT
-            height = ListPopupWindow.WRAP_CONTENT
-            isModal = true
-
-            setOnItemClickListener { _, _, position, _ ->
-                val selectedCurrency = currencyList[position]
-                // 更新货币类型
-                billInfoModel.currency = selectedCurrency.name
-                // 刷新显示
-                refresh()
-                dismiss()
+        BaseSheetDialog.create<CurrencySelectorDialog>(context)
+            .setSingleSelectMode(true)
+            .setBaseCurrency(PrefManager.baseCurrency)
+            .setFilterCodes(PrefManager.getSelectedCurrencySet())
+            .setSelectedCodes(currentCodes)
+            .setCallback { models ->
+                val model = models.firstOrNull() ?: return@setCallback
+                billInfoModel.currency = model.toJson()
+                // 币种变化影响 AmountDisplayComponent 的本位币换算，需触发全组件刷新
+                BillEditorDialog.notifyRefresh()
             }
+            .show()
+    }
+
+    /**
+     * 更新标签显示
+     */
+    private fun updateTagDisplay() {
+        if (!::billInfoModel.isInitialized) {
+            return
         }
 
-        // 显示弹窗并选中当前项
-        popupWindow.show()
-        val currentIndex = currencyList.indexOf(currentCurrency)
-        if (currentIndex >= 0) {
-            popupWindow.listView?.setSelection(currentIndex)
+        if (!PrefManager.featureTag
+            || billInfoModel.type == BillType.ExpendLending
+            || billInfoModel.type == BillType.ExpendRepayment
+            || billInfoModel.type == BillType.IncomeLending
+            || billInfoModel.type == BillType.IncomeRepayment
+        ) {
+            binding.tagLabels.visibility = View.GONE
+            return
         }
+
+        binding.tagLabels.visibility = View.VISIBLE
+
+        val tagNames = billInfoModel.getTagList()
+        // 统一使用标签工具渲染，保持风格一致
+        TagUtils.renderTagLabels(
+            binding.tagLabels,
+            tagNames,
+            context.getString(R.string.bill_tag_unselected)
+        )
     }
 }

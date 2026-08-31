@@ -19,6 +19,7 @@ import android.app.Application
 import android.os.Build
 import androidx.appcompat.app.AppCompatDelegate
 import com.tencent.bugly.crashreport.CrashReport
+import com.tencent.mmkv.MMKV
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -74,8 +75,7 @@ open class App : Application() {
 
         // 设置全局实例
         autoApp = this
-
-        Logger.debugging = PrefManager.debugMode
+        MMKV.initialize(this)
         // 初始化核心组件（优先初始化PrefManager以获取用户设置）
         initSystemComponents()
         initBuglyIfRelease()

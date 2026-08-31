@@ -51,19 +51,26 @@ materialThemeBuilder {
     generatePalette = true
 }
 
+val appVersionCode = calculateVersionCode()
+val appVersionName = "4.0.2"
+
+base {
+    archivesName.set("app-$appVersionName($appVersionCode)")
+}
+
 android {
     namespace = "net.ankio.auto"
-    compileSdk = 35
+    compileSdk = 36
 
 
     defaultConfig {
         applicationId = "net.ankio.auto"
         minSdk = 29
-        versionCode = calculateVersionCode()
-        versionName = "4.0.1"
+        targetSdk = 36
+        versionCode = appVersionCode
+        versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         flavorDimensions += "version"
-        setProperty("archivesBaseName", "app-${versionName}(${versionCode})")
 
 
 
@@ -79,7 +86,14 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            ndk {
+                abiFilters.clear()
+                abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
+            }
+        }
         getByName("release") {
+            // 开启代码压缩以启用R8优化，但通过proguard规则禁用混淆
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(
@@ -95,8 +109,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_21
     }
 
-    kotlinOptions {
-        jvmTarget = "21"
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+        }
     }
 
     packaging {
@@ -107,8 +123,9 @@ android {
             )
         }
 
-        // 如果以后要过滤 .so，改用 jniLibs.excludes += "lib/**/foo.so"
-        // jniLibs { excludes += "lib/**/yourNative.so" }
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
 
@@ -122,9 +139,25 @@ android {
         )
     }
 
+    bundle {
+        language {
+            enableSplit = false
+        }
+    }
+
     lint {
-        checkReleaseBuilds = false
-        abortOnError = false
+        checkReleaseBuilds = true
+        abortOnError = true
+        warningsAsErrors = false
+        fatal += setOf(
+            "CheckResult",
+            "InlinedApi",
+            "NewApi",
+            "Recycle",
+            "MissingPermission",
+            "WrongConstant",
+            "LaunchActivityFromNotification",
+        )
     }
 
 }
@@ -153,6 +186,7 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.navigation.fragment.ktx)
     implementation(libs.androidx.navigation.ui.ktx)
+    implementation(libs.fragment.ktx)
     implementation(libs.androidx.browser)
     implementation(libs.androidx.activity)
     implementation(libs.androidx.constraintlayout)
@@ -191,6 +225,7 @@ dependencies {
     implementation(project(":server"))
     implementation(project(":shell"))
     implementation(project(":ocr"))
+    implementation(project(":tap"))
 
     // debug依赖
     debugImplementation(libs.leakcanary.android)
@@ -199,17 +234,15 @@ dependencies {
 
     implementation(libs.rikkaMaterial)
     implementation(libs.rikkaMaterialPreference)
+    implementation(libs.about)
 
-    implementation("com.github.bumptech.glide:glide:4.16.0")
+    implementation(libs.glide)
 
-    implementation("com.tencent.bugly:crashreport:latest.release")
-    implementation("net.lingala.zip4j:zip4j:2.11.5")
+    implementation(libs.bugly)
+    implementation(libs.mmkv)
+    implementation(libs.zip4j)
     implementation(kotlin("reflect"))
 
-    // Sora Editor - 代码编辑器
-    val editorVersion = "0.23.7"
-    implementation("io.github.rosemoe:editor:$editorVersion")
-    implementation("io.github.rosemoe:language-textmate:$editorVersion")
 
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))
 

@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "net.ankio.shell"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 24
@@ -24,11 +24,13 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
-    kotlinOptions {
-        jvmTarget = "11"
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+        }
     }
     buildFeatures {
         aidl = true
@@ -40,6 +42,9 @@ dependencies {
 
     implementation(libs.core.ktx)
     // Shizuku API - 用于以 shell/system 身份访问系统服务
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.androidx.junit)
 }

@@ -31,6 +31,8 @@ import net.ankio.auto.xposed.hooks.qianji.models.QjBookModel
 import org.ezbook.server.db.model.BillInfoModel
 import org.json.JSONObject
 import kotlinx.coroutines.suspendCancellableCoroutine
+import net.ankio.auto.xposed.core.logger.XposedLogger
+import net.ankio.auto.xposed.hooks.qianji.sync.SyncClazz
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -51,7 +53,7 @@ abstract class BaseDebt {
     ): QjAssetAccountModel = suspendCancellableCoroutine { cont ->
         // 构建账本数据
         val json = JSONObject(billModel)
-        AppRuntime.manifest.i("提交资产=>${assetAccount},${book},${json}")
+        XposedLogger.i("submit asset, account=${assetAccount.getName()}, book=${book.getName()}")
 
         // 创建Presenter并设置视图代理，基于 onSubmitFinished 回调做结果决策
         val presenter = BaseSubmitAssetPresenterImpl.newInstance()
@@ -96,6 +98,7 @@ abstract class BaseDebt {
     }
 
     fun saveBill(bill: QjBillModel) {
+        bill.setStatus(QjBillModel.STATUS_NOT_SYNC)
         BillDbHelper.newInstance().saveOrUpdateBill(bill)
     }
 
@@ -105,6 +108,7 @@ abstract class BaseDebt {
     }
 
     fun pushBill() {
+        SyncClazz.getInstance().startPush(AppRuntime.application!!)
         /*  val companion = XposedHelpers.getStaticObjectField(billToolsClazz, "Companion")
           val billTools = XposedHelpers.callMethod(companion, "getInstance")
           XposedHelpers.callMethod(billTools, "startPush", AppRuntime.application!!)*/

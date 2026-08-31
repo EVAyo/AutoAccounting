@@ -25,7 +25,7 @@ import org.ezbook.server.tools.runCatchingExceptCancel
 import java.io.File
 
 /**
- * WebDAV 管理器 - 真正的Linus式简化
+ * WebDAV 管理器 - Linus式简化：一行代码搞定 URL
  * 只做一件事：上传/下载文件，不管UI，不管Toast
  */
 class WebDAVManager {
@@ -34,11 +34,8 @@ class WebDAVManager {
     private val backupUrl: String
 
     init {
-        // 直接计算最终URL，消除所有中间步骤
-        val host = PrefManager.webdavHost.trim('/')
-        val path = PrefManager.webdavPath.trim('/')
-        val base = if (path.isNotEmpty()) "$host/$path" else host
-        backupUrl = "$base/AutoAccounting"
+        // 一行搞定，没有特殊情况，没有条件判断
+        backupUrl = "${PrefManager.webdavUrl.trim('/')}/AutoAccounting"
 
         // 设置认证
         requestUtils.addHeader(
@@ -57,7 +54,7 @@ class WebDAVManager {
             requestUtils.mkcol(backupUrl).getOrNull()
             requestUtils.put("$backupUrl/$filename", file).getOrThrow()
             Logger.d("上传成功: $filename")
-            // 上传成功后自动清理旧备份，保持最多10个文件
+            // 上传成功后自动清理旧备份，保持用户配置的文件数量
             cleanupOldBackups()
             Unit
         }.onFailure {
@@ -90,17 +87,18 @@ class WebDAVManager {
     }
 
     /**
-     * 清理旧备份，只保留最新的10个文件
+     * 清理旧备份，只保留用户配置数量的文件
      * Linus式简化：上传后自动清理，用户无感知
      */
     private suspend fun cleanupOldBackups(): Result<Unit> = withContext(Dispatchers.IO) {
         runCatchingExceptCancel {
+            val keepCount = PrefManager.backupKeepCount
             val files = requestUtils.dir(backupUrl).getOrThrow()
             val backupFiles = files.filter { it.endsWith("." + BackupFileManager.SUFFIX) }
                 .sortedDescending()
-            if (backupFiles.size > 10) {
-                val filesToDelete = backupFiles.drop(10)
-                Logger.d("清理WebDAV备份: 删除${filesToDelete.size}个旧文件")
+            if (backupFiles.size > keepCount) {
+                val filesToDelete = backupFiles.drop(keepCount)
+                Logger.d("清理WebDAV备份: 保留${keepCount}个，删除${filesToDelete.size}个旧文件")
                 var deletedCount = 0
                 filesToDelete.forEach { filename -> if (deleteFile(filename).isSuccess) deletedCount++ }
                 Logger.d("清理完成: 成功删除${deletedCount}个文件")

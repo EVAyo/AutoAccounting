@@ -15,6 +15,11 @@
 
 package net.ankio.auto.ui.utils
 
+import android.graphics.Color
+import android.view.View
+import android.view.ViewGroup
+import com.google.android.material.color.MaterialColors
+import com.google.android.material.textview.MaterialTextView
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import net.ankio.auto.R
@@ -26,7 +31,12 @@ import java.io.InputStreamReader
 /**
  * 标签工具类，用于处理标签数据
  */
-class TagUtils {
+object TagUtils {
+
+    /**
+     * 动态标签视图标记，用于区分自动渲染的标签与其他子视图
+     */
+    private val tagLabelMarkerKey = R.id.tagLabelMarker
 
     /**
      * JSON标签项数据模型，用于解析default_tags.json
@@ -67,7 +77,6 @@ class TagUtils {
                 tagMap[category]?.forEach { jsonTag ->
                     val tagModel = createTagModel(
                         name = jsonTag.name,
-                        color = jsonTag.color,
                         group = category
                     )
                     tagList.add(tagModel)
@@ -85,20 +94,154 @@ class TagUtils {
     }
 
     /**
+     * 渲染标签列表到容器，风格与基础信息组件保持一致
+     * @param container 标签容器
+     * @param tagNames 标签名称列表
+     * @param emptyPlaceholder 空列表时显示的占位文本，传 null 则直接隐藏
+     * @param textSizeSp 文本大小，单位 sp
+     */
+    fun renderTagLabels(
+        container: ViewGroup,
+        tagNames: List<String>,
+        emptyPlaceholder: String? = null,
+        textSizeSp: Float = 12f
+    ) {
+        removeTagLabelViews(container)
+
+        // 处理空态占位文本
+        val isEmpty = tagNames.isEmpty()
+        val labelTexts = if (isEmpty) {
+            listOf(emptyPlaceholder ?: "")
+        } else {
+            tagNames
+        }
+
+        // 基础配色与基础信息组件保持一致
+        val defaultTextColor = MaterialColors.getColor(
+            container,
+            com.google.android.material.R.attr.colorOnSurfaceVariant
+        )
+        val defaultBackgroundColor = MaterialColors.getColor(
+            container,
+            com.google.android.material.R.attr.colorSurfaceContainerLow
+        )
+        val surfaceStrongColor = MaterialColors.getColor(
+            container,
+            com.google.android.material.R.attr.colorSurfaceContainerHighest
+        )
+        val emptyTextColor = applyAlpha(defaultTextColor, 0.6f)
+        val emptyBackgroundColor = applyAlpha(defaultBackgroundColor, 0.6f)
+
+        // 无标签且无需占位时，只隐藏纯标签容器，避免影响其他控件
+        if (isEmpty && emptyPlaceholder == null) {
+            return
+        }
+
+        val paddingHorizontal = dpToPx(container, 8)
+        val paddingVertical = dpToPx(container, 3)
+
+        labelTexts.forEach { text ->
+            // 空态弱化显示，非空态使用标签配色
+            val (textColor, backgroundColor) = if (isEmpty) {
+                emptyTextColor to emptyBackgroundColor
+            } else {
+                val (tColor, bgColor, _) = PaletteManager.getSelectorTagColors(
+                    container.context,
+                    text,
+                    defaultTextColor,
+                    defaultBackgroundColor,
+                    surfaceStrongColor,
+                    true
+                )
+                tColor to bgColor
+            }
+
+            val label = MaterialTextView(container.context).apply {
+                // 标签文本保持原样，不增加图标等装饰
+                this.text = text
+                setTextColor(textColor)
+                textSize = textSizeSp
+                setPadding(paddingHorizontal, paddingVertical, paddingHorizontal, paddingVertical)
+                background = container.context.getDrawable(R.drawable.currency_label_background)
+                background?.setTint(backgroundColor)
+                // 标记为工具渲染的标签，便于下次局部清理
+                setTag(tagLabelMarkerKey, true)
+            }
+            val params = ViewGroup.MarginLayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            container.addView(label, params)
+        }
+    }
+
+
+    /**
+     * 移除当前工具渲染的标签视图，保留其他子视图
+     * @param container 标签容器
+     */
+    private fun removeTagLabelViews(container: ViewGroup) {
+        for (index in container.childCount - 1 downTo 0) {
+            val child = container.getChildAt(index)
+            if (child.getTag(tagLabelMarkerKey) == true) {
+                container.removeViewAt(index)
+            }
+        }
+    }
+
+    /**
+     * 判断容器是否包含非标签子视图
+     * @param container 标签容器
+     * @return true 表示存在非标签子视图
+     */
+    private fun hasNonTagChildren(container: ViewGroup): Boolean {
+        for (index in 0 until container.childCount) {
+            val child = container.getChildAt(index)
+            if (child.getTag(tagLabelMarkerKey) != true) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
      * 创建TagModel实例
      * @param name 标签名称
-     * @param color 标签颜色
      * @return TagModel实例
      */
     private fun createTagModel(
         name: String,
-        color: String,
         group: String
     ): TagModel {
         return TagModel().apply {
             this.name = name
-            this.color = color
             this.group = group
         }
+    }
+
+    /**
+     * dp 转 px，避免硬编码
+     * @param view 参考视图
+     * @param dp dp 数值
+     * @return px 数值
+     */
+    private fun dpToPx(view: View, dp: Int): Int {
+        return (dp * view.resources.displayMetrics.density).toInt()
+    }
+
+    /**
+     * 透明度处理，保持风格统一
+     * @param color 原始颜色
+     * @param alpha 透明度比例
+     * @return 应用透明度后的颜色
+     */
+    private fun applyAlpha(color: Int, alpha: Float): Int {
+        val clampedAlpha = (alpha.coerceIn(0f, 1f) * 255).toInt()
+        return Color.argb(
+            clampedAlpha,
+            Color.red(color),
+            Color.green(color),
+            Color.blue(color)
+        )
     }
 }

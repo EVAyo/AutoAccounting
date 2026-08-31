@@ -34,7 +34,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import net.ankio.auto.http.api.BookBillAPI
 import net.ankio.auto.http.api.SettingAPI
-import net.ankio.auto.xposed.core.logger.Logger
+import net.ankio.auto.xposed.core.logger.XposedLogger
 
 /**
  * 通过 Xposed 反射驱动钱迹的报销模块：
@@ -141,11 +141,11 @@ object BxPresenterImpl : HookerClazz() {
         val sync = Gson().toJson(bills)
         val md5 = MD5HashTable.md5(sync)
         val server = SettingAPI.get(Setting.HASH_BAOXIAO_BILL, "")
-        if (server == md5 && !AppRuntime.debug) {
-            AppRuntime.manifest.i("No need to sync BaoXiao, server md5:${server} local md5:${md5}")
+        if (server == md5) {
+            XposedLogger.i(" skip sync, MD5 matched")
             return@withContext
         }
-        AppRuntime.manifest.d("Sync BaoXiao:$sync")
+        XposedLogger.d(" sync reimbursement, count=${bills.size}")
         BookBillAPI.put(bills, md5, Setting.HASH_BAOXIAO_BILL)
         withContext(Dispatchers.Main) {
             MessageUtils.toast("已同步报销账单到自动记账")
@@ -182,7 +182,7 @@ object BxPresenterImpl : HookerClazz() {
             billList.filter {
                 val bill = QjBillModel.fromObject(it!!)
                 val billId = bill.getBillid()
-                AppRuntime.manifest.d("billId:$billId")
+                // billId filter
                 // 判断billId是否在list中
                 list.contains(billId.toString())
             }
@@ -268,9 +268,8 @@ object BxPresenterImpl : HookerClazz() {
      */
     fun convert2Bill(anyBills: List<*>, type: String): ArrayList<BookBillModel> {
         val bills = arrayListOf<BookBillModel>()
-        AppRuntime.manifest.d("账单总数：${anyBills.size}")
+        XposedLogger.d(" convert bills, total=${anyBills.size}")
         anyBills.forEach {
-            AppRuntime.manifest.d("报销/支出：$it")
             if (it == null) {
                 return@forEach
             }
@@ -283,6 +282,8 @@ object BxPresenterImpl : HookerClazz() {
             bill.remoteBookId = billModel.getBookId().toString()
             bill.category = billModel.getCategory()?.getName() ?: ""
             bill.type = type
+            // 透传账单标志位，用于“不计收支/不计预算”等状态
+            //bill.flag = billModel.getExtra().getFlag()
             bills.add(bill)
 
             // 债务账单

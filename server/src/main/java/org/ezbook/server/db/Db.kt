@@ -35,7 +35,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.IOException
-import org.ezbook.server.tools.ServerLog
+import org.ezbook.server.log.ServerLog
 import org.ezbook.server.tools.runCatchingExceptCancel
 
 object Db {
@@ -71,6 +71,12 @@ object Db {
                 .addMigrations(MIGRATION_12_13)
                 .addMigrations(MIGRATION_13_14)
                 .addMigrations(MIGRATION_14_15)
+                .addMigrations(MIGRATION_15_16)
+                .addMigrations(MIGRATION_16_17)
+                .addMigrations(MIGRATION_17_18)
+                .addMigrations(MIGRATION_18_19)
+                .addMigrations(MIGRATION_19_20)
+                .addMigrations(MIGRATION_20_21)
                 .build()
         }
     }
@@ -85,6 +91,40 @@ object Db {
             throw IllegalStateException("Database not initialized. Call init() first.")
         }
         return db
+    }
+
+    /**
+     * 清理历史遗留的备份临时文件
+     * - 删除 filesDir 下的 autoAccount_backup_*.db
+     * - 删除 databases 目录中的临时文件 db_backup.db
+     *
+     * 仅清理特定命名的临时文件，不影响正式数据库文件。
+     */
+    suspend fun cleanupResidualBackups(context: Context) {
+        runCatchingExceptCancel {
+            // 1) 清理 filesDir 下历史遗留的 autoAccount_backup_*.db
+            context.filesDir.listFiles()?.forEach { file ->
+                val name = file.name
+                if (file.isFile &&
+                    name.startsWith("autoAccount_backup_") &&
+                    name.endsWith(".db")
+                ) {
+                    if (file.delete()) {
+                        ServerLog.d("已清理历史备份临时文件：${file.absolutePath}")
+                    }
+                }
+            }
+
+            // 2) 清理导入阶段临时文件 db_backup.db（位于 databases 目录）
+            val stagingFile = context.getDatabasePath("db_backup.db")
+            if (stagingFile.exists()) {
+                if (stagingFile.delete()) {
+                    ServerLog.d("已清理导入阶段临时文件：${stagingFile.absolutePath}")
+                }
+            }
+        }.onFailure { e ->
+            ServerLog.e("清理历史备份临时文件失败：${e.message}", e)
+        }
     }
 
     /**

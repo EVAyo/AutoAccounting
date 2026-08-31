@@ -198,7 +198,11 @@ class PaymentInfoComponent(
         val text = if (selectedBills.isEmpty()) {
             context.getString(R.string.float_choose_bill)
         } else {
-            context.getString(R.string.float_choose_bills, selectedBills.size)
+            context.resources.getQuantityString(
+                R.plurals.float_choose_bills,
+                selectedBills.size,
+                selectedBills.size
+            )
         }
         binding.chooseBillButton.text = text
     }
@@ -333,6 +337,17 @@ class PaymentInfoComponent(
         binding.transferTo.setOnClickListener {
             showAssetSelector(false)
         }
+        // 转账方向点击：交换来源/目标账户
+        binding.transferSwap.setOnClickListener {
+            swapTransferAccounts(binding.transferSwap)
+        }
+        // 债务方向箭头点击：交换来源/目标账户
+        binding.debtSwap.setOnClickListener {
+            swapTransferAccounts(binding.debtSwap)
+        }
+        binding.debtSwap2.setOnClickListener {
+            swapTransferAccounts(binding.debtSwap2)
+        }
 
         // 债务账户点击
         binding.debtAccount.setOnClickListener {
@@ -360,15 +375,9 @@ class PaymentInfoComponent(
         // 使用BaseSheetDialog工厂方法创建对话框
         val dialog = BaseSheetDialog.create<AssetsSelectorDialog>(context)
 
-        // 根据账单类型设置资产过滤
-        val filter = when (billInfoModel.type) {
-            BillType.ExpendReimbursement,
-            BillType.IncomeRefund, BillType.IncomeReimbursement ->
-                listOf(AssetsType.CREDIT, AssetsType.NORMAL)  // 限制为信用卡和普通账户
-
-            else -> emptyList()  // 其他类型不限制资产类型
-        }
-
+        // 根据账单类型设置资产过滤：资金账户选择限制为普通资产+信用账户
+        // 欠款人/债主通过下拉选择，不在资产选择器中
+        val filter = listOf(AssetsType.NORMAL, AssetsType.CREDIT)
         dialog.setFilter(filter)
             .setCallback { selectedAsset ->
                 // 更新账户名称
@@ -463,6 +472,31 @@ class PaymentInfoComponent(
                 // isFirstAccount=true 时不更新，因为来源是人员而非账户
             }
         }
+    }
+
+    /**
+     * 交换转账来源/目标账户（仅转账类型生效）
+     */
+    private fun swapTransferAccounts(arrowView: View) {
+        if (!::billInfoModel.isInitialized) { // 未初始化则直接返回
+            return
+        }
+        val from = billInfoModel.accountNameFrom // 备份来源
+        val to = billInfoModel.accountNameTo // 备份目标
+        billInfoModel.accountNameFrom = to // 交换来源
+        billInfoModel.accountNameTo = from // 交换目标
+        playSwapAnimation(arrowView) // 触发轻微动画提示
+        refresh() // 刷新显示与图标
+    }
+
+    /**
+     * 转账交换动画（轻微提示，不刻意）
+     */
+    private fun playSwapAnimation(arrowView: View) {
+        arrowView.animate() // 启动动画
+            .rotationBy(360f) // 旋转一整圈
+            .setDuration(220L) // 动画时长
+            .start() // 开始动画
     }
 }
 

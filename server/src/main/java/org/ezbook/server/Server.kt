@@ -22,15 +22,14 @@ import io.ktor.server.netty.NettyApplicationEngine
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.ezbook.server.db.Db
 import org.ezbook.server.server.module
-import org.ezbook.server.task.BillProcessor
-import org.ezbook.server.tools.ServerLog
+import org.ezbook.server.log.ServerLog
 import org.ezbook.server.tools.SettingUtils
+import java.net.ServerSocket
 
 
 class Server(private val context: Application) {
@@ -48,14 +47,10 @@ class Server(private val context: Application) {
      * 启动服务
      */
     fun startServer() {
-        runBlocking {
-            ServerLog.debugging = SettingUtils.debugMode()
-        }
         server = embeddedServer(Netty, port = port) {
             module(context)
         }
         server.start()
-        billProcessor = BillProcessor()
         application = context
     }
 
@@ -66,7 +61,6 @@ class Server(private val context: Application) {
 
     fun stopServer() {
         server.stop(0, 0)
-        billProcessor.shutdown()
     }
 
 
@@ -77,10 +71,18 @@ class Server(private val context: Application) {
         const val PORT: Int = 52045
 
         var versionName = "1.0.0"
+        var versionCode = 1
         var packageName = "net.ankio.auto"
-        var debug = false
-        lateinit var billProcessor: BillProcessor
+        var debugPackage = false
         lateinit var application: Application
+
+        fun isPortOccupied(): Boolean {
+            return try {
+                ServerSocket(PORT).use { false }
+            } catch (_: Throwable) {
+                true
+            }
+        }
 
         /**
          * 统一的协程异常处理器：防止单个异常导致整个作用域崩溃
@@ -91,10 +93,15 @@ class Server(private val context: Application) {
 
         /** 全局协程作用域 - 使用 SupervisorJob 防止异常传播 */
         private val mainJob = SupervisorJob()
-        private val mainScope = CoroutineScope(Dispatchers.Main + mainJob + exceptionHandler)
 
+        /** IO 专用作用域，避免依赖 Main dispatcher */
+        private val ioScope = CoroutineScope(Dispatchers.IO + mainJob + exceptionHandler)
+
+        /**
+         * 统一的 IO 执行入口：用于后台任务与日志写入。
+         */
         fun withIO(block: suspend () -> Unit) {
-            mainScope.launch(Dispatchers.IO) { block() }
+            ioScope.launch { block() }
         }
 
 

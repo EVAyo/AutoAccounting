@@ -40,7 +40,7 @@ class BackupFileManager(private val context: Context) {
 
     companion object {
         const val SUFFIX = "pk"
-        const val SUPPORT_VERSION = 202
+        const val SUPPORT_VERSION = 203
     }
 
     private var loading = runCatching {
@@ -62,7 +62,7 @@ class BackupFileManager(private val context: Context) {
 
             // 备份配置文件
             loading?.setText(context.getString(R.string.backup_preferences))
-            backupPreferences(backupDir)
+            backupDataDirectory(backupDir)
 
             // 创建索引文件
             loading?.setText(context.getString(R.string.backup_creating_index))
@@ -105,7 +105,7 @@ class BackupFileManager(private val context: Context) {
 
             // 恢复配置文件
             loading?.setText(context.getString(R.string.restore_preferences))
-            restorePreferences(backupDir)
+            restoreDataDirectory(backupDir)
 
             // 清空缓存，确保恢复的数据生效
             loading?.setText(context.getString(R.string.restore_clearing_cache))
@@ -128,7 +128,7 @@ class BackupFileManager(private val context: Context) {
      * 准备备份目录
      */
     private fun prepareBackupDirectory(): File {
-        val backupDir = File(context.filesDir, "backup")
+        val backupDir = File(context.cacheDir, "backup")
         if (backupDir.exists()) {
             backupDir.deleteRecursively()
         }
@@ -145,6 +145,11 @@ class BackupFileManager(private val context: Context) {
         val result = requestUtils.download("http://127.0.0.1:52045/db/export", dbFile)
 
         if (result.isFailure) {
+            val exception = result.exceptionOrNull()
+            if (exception !== null) {
+                Logger.e(exception)
+            }
+
             throw RestoreBackupException(context.getString(R.string.backup_error))
         }
     }
@@ -158,6 +163,7 @@ class BackupFileManager(private val context: Context) {
             "versionName" to BuildConfig.VERSION_NAME,
             "packageName" to BuildConfig.APPLICATION_ID,
             "packageVersion" to BuildConfig.VERSION_CODE,
+            "backupType" to "fullDataDir",
         )
 
         val json = Gson().toJson(indexData)
@@ -198,40 +204,83 @@ class BackupFileManager(private val context: Context) {
     private suspend fun restoreDatabase(backupDir: File) {
         val dbFile = File(backupDir, "auto.db")
         val requestUtils = RequestsUtils()
-        val result = requestUtils.upload("http://127.0.0.1:52045/db/import", dbFile)
+        val result = requestUtils.put("http://127.0.0.1:52045/db/import", dbFile)
         Logger.d("数据库导入结果: $result")
     }
 
     /**
-     * 备份配置文件
+     * 备份应用 dataDir（包含 shared_prefs、files、databases 等）
      */
-    private fun backupPreferences(backupDir: File) {
+    private fun backupDataDirectory(backupDir: File) {
         try {
-            // Android SharedPreferences 文件路径
-            val prefsDir = File(context.applicationInfo.dataDir, "shared_prefs")
-            val settingsFile = File(prefsDir, "settings.xml")
+            val sourceDataDir = File(context.applicationInfo.dataDir)
+            val snapshotDir = File(backupDir, "data_dir")
+            val backupWorkDir = backupDir.canonicalFile
 
-            if (settingsFile.exists()) {
-                val backupPrefsFile = File(backupDir, "settings.xml")
-                settingsFile.copyTo(backupPrefsFile, overwrite = true)
-                Logger.d("配置文件备份完成")
-            } else {
-                Logger.w("配置文件不存在，跳过备份")
+            if (!sourceDataDir.exists()) {
+                Logger.w("应用 dataDir 不存在，跳过备份")
+                return
             }
+
+            copyDirectoryWithExcludes(
+                sourceDir = sourceDataDir,
+                targetDir = snapshotDir,
+                excludedRoots = setOf(backupWorkDir),
+            )
+            Logger.d("dataDir 备份完成: ${snapshotDir.absolutePath}")
         } catch (e: Exception) {
-            Logger.w("配置文件备份失败: ${e.message}")
+            Logger.w("dataDir 备份失败: ${e.message}")
         }
     }
 
     /**
-     * 恢复配置文件
+     * 恢复应用 dataDir
      */
-    private fun restorePreferences(backupDir: File) {
+    private fun restoreDataDirectory(backupDir: File) {
+        try {
+            val snapshotDir = File(backupDir, "data_dir")
+            if (!snapshotDir.exists()) {
+                Logger.w("备份中没有 data_dir，尝试兼容恢复旧版配置文件")
+                restoreLegacyPreferences(backupDir)
+                return
+            }
+
+            val targetDataDir = File(context.applicationInfo.dataDir)
+            val protectedRoot = backupDir.canonicalFile
+
+            if (!targetDataDir.exists()) {
+                targetDataDir.mkdirs()
+            }
+
+            // 清理现有 dataDir（保留当前恢复流程正在使用的临时备份目录）
+            targetDataDir.listFiles()?.forEach { child ->
+                val childPath = child.canonicalFile
+                val shouldKeep = childPath == protectedRoot ||
+                        childPath.path.startsWith(protectedRoot.path + File.separator)
+                if (!shouldKeep) {
+                    child.deleteRecursively()
+                }
+            }
+
+            copyDirectoryWithExcludes(
+                sourceDir = snapshotDir,
+                targetDir = targetDataDir,
+                excludedRoots = emptySet(),
+            )
+            Logger.d("dataDir 恢复完成")
+        } catch (e: Exception) {
+            Logger.w("dataDir 恢复失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 兼容旧备份：仅恢复 settings.xml
+     */
+    private fun restoreLegacyPreferences(backupDir: File) {
         try {
             val backupPrefsFile = File(backupDir, "settings.xml")
 
             if (backupPrefsFile.exists()) {
-                // Android SharedPreferences 文件路径
                 val prefsDir = File(context.applicationInfo.dataDir, "shared_prefs")
                 if (!prefsDir.exists()) {
                     prefsDir.mkdirs()
@@ -250,5 +299,35 @@ class BackupFileManager(private val context: Context) {
         } catch (e: Exception) {
             Logger.w("配置文件恢复失败: ${e.message}")
         }
+    }
+
+    /**
+     * 递归复制目录，并排除指定根目录（用于避免把备份工作目录复制进快照）
+     */
+    private fun copyDirectoryWithExcludes(
+        sourceDir: File,
+        targetDir: File,
+        excludedRoots: Set<File>,
+    ) {
+        val excludedPaths = excludedRoots.map { it.canonicalPath }
+
+        sourceDir.walkTopDown()
+            .onEnter { dir ->
+                val dirPath = dir.canonicalPath
+                excludedPaths.none { excluded ->
+                    dirPath == excluded || dirPath.startsWith(excluded + File.separator)
+                }
+            }
+            .forEach { source ->
+                val relativePath = source.relativeTo(sourceDir).path
+                val target =
+                    if (relativePath.isEmpty()) targetDir else File(targetDir, relativePath)
+                if (source.isDirectory) {
+                    target.mkdirs()
+                } else {
+                    target.parentFile?.mkdirs()
+                    source.copyTo(target, overwrite = true)
+                }
+            }
     }
 }

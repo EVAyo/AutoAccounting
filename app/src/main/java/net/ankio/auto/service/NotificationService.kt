@@ -33,15 +33,17 @@ import net.ankio.auto.service.api.IService
 import net.ankio.auto.storage.Logger
 import net.ankio.auto.utils.PrefManager
 import org.ezbook.server.constant.DataType
+import org.ezbook.server.tools.MD5HashTable
 
 class NotificationService : NotificationListenerService() {
+    private val hashTable = MD5HashTable()
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return super.onStartCommand(intent, flags, startId)
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         super.onNotificationPosted(sbn)
-        if (WorkMode.isXposed()) return
         //获取用户通知
         runCatching {
             val notification = sbn?.notification!!
@@ -57,7 +59,7 @@ class NotificationService : NotificationListenerService() {
 
             checkNotification(app!!, title, text)
         }.onFailure {
-            Logger.e("NotificationService: ${it.message}", it)
+            Logger.e("NotificationService error: ${it.message}", it)
         }
     }
 
@@ -83,15 +85,28 @@ class NotificationService : NotificationListenerService() {
         val apps = PrefManager.appWhiteList
 
         if (title.isEmpty() && text.isEmpty()) {
+            Logger.d("Notification skipped: pkg=$pkg, title and text empty")
             return
         }
+
+        val key = "$pkg$title$text"
+        if (hashTable.contains(key)) {
+            Logger.d("Notification skipped: pkg=$pkg, duplicate content")
+            return
+        }
+        hashTable.put(key)
 
         if (!apps.contains(pkg)) {
+            Logger.d("Notification skipped: pkg=$pkg not in app whitelist")
             return
         }
-
-        if (PrefManager.dataFilter.all { !text.contains(it) }) {
-            Logger.d("数据信息不在识别关键字里面，忽略")
+        val content = "$title $text".trim()
+        if (!AnalysisUtils.inWhitelist(content)) {
+            Logger.d("Notification skipped: pkg=$pkg, no keyword matched")
+            return
+        }
+        if (AnalysisUtils.inBlackList(content)) {
+            Logger.d("Notification skipped: pkg=$pkg, blacklist matched")
             return
         }
 
@@ -102,9 +117,8 @@ class NotificationService : NotificationListenerService() {
                 addProperty("t", System.currentTimeMillis())
             }
             App.launch {
-                val billResult =
-                    JsAPI.analysis(DataType.DATA, Gson().toJson(json), "com.android.phone")
-                Logger.d("识别结果：${billResult?.billInfoModel}")
+                val result = JsAPI.analysis(DataType.DATA, Gson().toJson(json), "com.android.phone")
+                Logger.d("SMS analysis result: ${result.data?.billInfoModel}")
             }
             // Analyze.start(DataType.DATA, Gson().toJson(json), "com.android.phone")
         } else {
@@ -113,9 +127,8 @@ class NotificationService : NotificationListenerService() {
             json.addProperty("text", text)
             json.addProperty("t", System.currentTimeMillis())
             App.launch {
-                val billResult =
-                    JsAPI.analysis(DataType.NOTICE, Gson().toJson(json), pkg)
-                Logger.d("识别结果：${billResult?.billInfoModel}")
+                val result = JsAPI.analysis(DataType.NOTICE, Gson().toJson(json), pkg)
+                Logger.d("Notice analysis result: pkg=$pkg, bill=${result.data?.billInfoModel}")
             }
             //  Analyze.start(DataType.NOTICE, Gson().toJson(json), pkg)
         }
